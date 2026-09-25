@@ -1,0 +1,15 @@
+# Android Studio and Gradle
+.gradle/
+.idea/
+build/
+*/build/
+
+# Local machine configuration
+local.properties
+
+# OS files
+.DS_Store
+
+# Keystores and signing artifacts
+*.jks
+*.keystore
