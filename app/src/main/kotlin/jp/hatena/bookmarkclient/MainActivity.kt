@@ -1269,6 +1269,8 @@ private fun CommentsScreen(
                             text = entry.title,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontSize = 16.sp,
                         )
                     },
                     navigationIcon = {
@@ -1349,6 +1351,7 @@ private fun CommentsContent(
                     contentPadding = PaddingValues(bottom = 24.dp),
                 ) {
                     item {
+                      /*
                         Text(
                             text = "ブックマークユーザー",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1358,6 +1361,7 @@ private fun CommentsContent(
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .padding(16.dp),
                         )
+                       */
                     }
                     val comments = if (ranked) {
                         state.comments.sortedWith(
