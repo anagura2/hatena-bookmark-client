@@ -85,6 +85,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.Color
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
@@ -1011,6 +1012,8 @@ private fun EntryWebViewScreen(
                         text = entry.title,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontSize = 16.sp,
                     )
                 },
                 navigationIcon = {
