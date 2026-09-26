@@ -1,3 +1,12 @@
+import java.util.Properties
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use(::load)
+    }
+}
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -14,10 +23,21 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField(
+            "String",
+            "HATENA_CONSUMER_KEY",
+            "\"${localProperties.getProperty("hatena.consumerKey", "")}\"",
+        )
+        buildConfigField(
+            "String",
+            "HATENA_CONSUMER_SECRET",
+            "\"${localProperties.getProperty("hatena.consumerSecret", "")}\"",
+        )
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {

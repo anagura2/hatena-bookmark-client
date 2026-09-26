@@ -1,5 +1,6 @@
 # Android Studio and Gradle
 .gradle/
+.kotlin/
 .idea/
 build/
 */build/
