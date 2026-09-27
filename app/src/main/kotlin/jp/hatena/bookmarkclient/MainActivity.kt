@@ -3,6 +3,7 @@ package jp.hatena.bookmarkclient
 import android.os.Bundle
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -28,13 +29,19 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.OpenInBrowser
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.ArrowBack
@@ -63,8 +70,10 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -80,6 +89,9 @@ import androidx.compose.animation.core.tween
 import androidx.lifecycle.lifecycleScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -120,9 +132,17 @@ private data class BookmarkComment(
     val commentUri: String,
 )
 
+private data class RelatedEntry(
+    val title: String,
+    val entryUrl: String,
+    val articleUrl: String,
+    val bookmarkCount: Int,
+)
+
 private data class BookmarkCommentPage(
     val comments: List<BookmarkComment>,
     val hasMore: Boolean,
+    val relatedEntries: List<RelatedEntry> = emptyList(),
 )
 
 private data class BookmarkCommentTarget(
@@ -165,6 +185,7 @@ private sealed interface CommentsState {
         val comments: List<BookmarkComment>,
         val hasMore: Boolean,
         val loadingMore: Boolean = false,
+        val relatedEntries: List<RelatedEntry> = emptyList(),
     ) : CommentsState
     data class Error(val message: String) : CommentsState
 }
@@ -294,16 +315,20 @@ private fun PopularEntriesScreen(
     onEntryOpened: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var state by remember { mutableStateOf<EntriesState>(EntriesState.Loading) }
+    val categoryStates = remember { mutableStateMapOf<String, EntriesState>() }
+    val listStates = remember { mutableMapOf<String, LazyListState>() }
     var selectedEntry by remember { mutableStateOf<PopularEntry?>(null) }
     var selectedCategory by remember { mutableStateOf(entryCategories.first()) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     var showMyBookmarks by remember { mutableStateOf(false) }
 
-    fun loadEntries(category: EntryCategory = selectedCategory) {
-        state = EntriesState.Loading
+    fun loadEntries(category: EntryCategory = selectedCategory, forceReload: Boolean = false) {
+        if (!forceReload && categoryStates[category.feedUrl] is EntriesState.Loaded) {
+            return
+        }
+        categoryStates[category.feedUrl] = EntriesState.Loading
         scope.launch {
-            state = try {
+            categoryStates[category.feedUrl] = try {
                 EntriesState.Loaded(withContext(Dispatchers.IO) {
                     fetchPopularEntries(category.feedUrl)
                 })
@@ -316,29 +341,17 @@ private fun PopularEntriesScreen(
     fun selectCategory(category: EntryCategory) {
         if (category == selectedCategory) return
         selectedCategory = category
-        loadEntries(category)
+        if (categoryStates[category.feedUrl] !is EntriesState.Loaded) {
+            loadEntries(category)
+        }
     }
 
-    LaunchedEffect(Unit) {
-        loadEntries()
+    LaunchedEffect(selectedCategory) {
+        if (categoryStates[selectedCategory.feedUrl] !is EntriesState.Loaded) {
+            loadEntries(selectedCategory)
+        }
     }
 
-    if (selectedEntry != null) {
-        EntryWebViewScreen(
-            entry = selectedEntry!!,
-            oauthClient = oauthClient,
-            onBack = { selectedEntry = null },
-        )
-        return
-    }
-    if (showMyBookmarks) {
-        MyBookmarksScreen(
-            oauthClient = oauthClient,
-            onBack = { showMyBookmarks = false },
-            onSelectEntry = { selectedEntry = it; showMyBookmarks = false },
-        )
-        return
-    }
 
     if (oauthLoading) {
         AlertDialog(
@@ -395,8 +408,9 @@ private fun PopularEntriesScreen(
         )
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
+    Box(modifier = Modifier.fillMaxSize()) {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(
                 drawerContainerColor = MaterialTheme.colorScheme.surface,
@@ -478,7 +492,7 @@ private fun PopularEntriesScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = ::loadEntries) {
+                        IconButton(onClick = { loadEntries(selectedCategory, forceReload = true) }) {
                             Icon(Icons.Outlined.Search, contentDescription = "検索")
                         }
                     },
@@ -538,23 +552,25 @@ private fun PopularEntriesScreen(
                     )
                 },
                 label = "category-content",
-            ) {
-            when (val currentState = state) {
+            ) { targetCategory ->
+            when (val currentState = categoryStates[targetCategory.feedUrl] ?: EntriesState.Loading) {
                 EntriesState.Loading -> LoadingContent(innerPadding)
                 is EntriesState.Error -> ErrorContent(
                     message = currentState.message,
                     contentPadding = innerPadding,
-                    onRetry = ::loadEntries,
+                    onRetry = { loadEntries(targetCategory, forceReload = true) },
                 )
                 is EntriesState.Loaded -> {
                     if (currentState.entries.isEmpty()) {
                         ErrorContent(
                             message = "表示できる記事がありません",
                             contentPadding = innerPadding,
-                            onRetry = ::loadEntries,
+                            onRetry = { loadEntries(targetCategory, forceReload = true) },
                         )
                     } else {
-                        val listState = rememberLazyListState()
+                        val listState = listStates.getOrPut(targetCategory.feedUrl) {
+                            LazyListState()
+                        }
                         LazyColumn(
                             state = listState,
                             modifier = Modifier
@@ -597,6 +613,35 @@ private fun PopularEntriesScreen(
                 }
             }
 
+        }
+    }
+
+        if (showMyBookmarks) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background),
+            ) {
+                MyBookmarksScreen(
+                    oauthClient = oauthClient,
+                    onBack = { showMyBookmarks = false },
+                    onSelectEntry = { selectedEntry = it },
+                )
+            }
+        }
+
+        selectedEntry?.let { entry ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background),
+            ) {
+                EntryWebViewScreen(
+                    entry = entry,
+                    oauthClient = oauthClient,
+                    onBack = { selectedEntry = null },
+                )
+            }
         }
     }
 }
@@ -885,6 +930,7 @@ private fun EntryWebViewScreen(
     onBack: () -> Unit,
 ) {
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var canGoBack by remember { mutableStateOf(false) }
     var showComments by remember { mutableStateOf(false) }
     var selectedCommentUri by remember { mutableStateOf<String?>(null) }
     var showBookmarkEditor by remember { mutableStateOf(false) }
@@ -903,6 +949,7 @@ private fun EntryWebViewScreen(
                     comments = page.comments,
                     hasMore = page.hasMore,
                     loadingMore = page.hasMore,
+                    relatedEntries = page.relatedEntries,
                 )
                 offset += page.comments.size
 
@@ -1030,32 +1077,92 @@ private fun EntryWebViewScreen(
             )
         },
         bottomBar = {
+            val context = LocalContext.current
+            val clipboardManager = LocalClipboardManager.current
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                horizontalArrangement = Arrangement.Center,
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(
+                    onClick = {
+                        if (webView?.canGoBack() == true) {
+                            webView?.goBack()
+                        }
+                    },
+                    enabled = canGoBack,
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.ArrowBack,
+                        contentDescription = "前のページへ",
+                        tint = if (canGoBack) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        },
+                    )
+                }
+                IconButton(
                     onClick = { showBookmarkEditor = true },
-                    modifier = Modifier.size(64.dp),
                 ) {
                     Text(
                         text = "B!",
                         color = Color.White,
-                        style = MaterialTheme.typography.headlineSmall,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { showComments = true }
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.ChatBubbleOutline,
+                        contentDescription = "コメント一覧",
+                        tint = Color(0xFF00B8D4),
+                        modifier = Modifier.size(24.dp),
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "${entry.bookmarkCount}",
+                        color = Color(0xFFFF4D83),
+                        style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Bold,
                     )
                 }
                 IconButton(
-                    onClick = { showComments = true },
-                    modifier = Modifier.size(64.dp),
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(entry.url))
+                        Toast.makeText(context, "URLをコピーしました", Toast.LENGTH_SHORT).show()
+                    },
                 ) {
                     Icon(
-                        imageVector = Icons.Outlined.ChatBubbleOutline,
-                        contentDescription = "コメント",
-                        tint = Color(0xFF00B8D4),
-                        modifier = Modifier.size(32.dp),
+                        imageVector = Icons.Outlined.ContentCopy,
+                        contentDescription = "URLをコピー",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                IconButton(
+                    onClick = {
+                        val targetUrl = webView?.url ?: entry.url
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl))
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "ブラウザを開けませんでした", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.OpenInBrowser,
+                        contentDescription = "ブラウザで開く",
+                        tint = MaterialTheme.colorScheme.onSurface,
                     )
                 }
             }
@@ -1068,7 +1175,16 @@ private fun EntryWebViewScreen(
             factory = { context ->
                 WebView(context).apply {
                     webView = this
-                    webViewClient = WebViewClient()
+                    webViewClient = object : WebViewClient() {
+                        override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                            super.doUpdateVisitedHistory(view, url, isReload)
+                            canGoBack = view?.canGoBack() == true
+                        }
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            canGoBack = view?.canGoBack() == true
+                        }
+                    }
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.loadsImagesAutomatically = true
@@ -1200,7 +1316,24 @@ private fun BookmarkEditorScreen(
                 ),
             )
         },
-        bottomBar = {
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            PopularEntryCard(entry = entry, onClick = {})
+            OutlinedTextField(
+                value = comment,
+                onValueChange = { if (it.length <= 100) comment = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .height(180.dp),
+                placeholder = { Text("コメントを入力（任意）") },
+                supportingText = { Text("${comment.length} / 100") },
+            )
             Button(
                 onClick = {
                     state = BookmarkPostState.Saving
@@ -1220,28 +1353,10 @@ private fun BookmarkEditorScreen(
                 enabled = state !is BookmarkPostState.Saving && comment.length <= 100,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp),
+                    .padding(horizontal = 16.dp),
             ) {
                 Text(if (state is BookmarkPostState.Saving) "保存中…" else "保存")
             }
-        },
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-        ) {
-            PopularEntryCard(entry = entry, onClick = {})
-            OutlinedTextField(
-                value = comment,
-                onValueChange = { if (it.length <= 100) comment = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .height(180.dp),
-                placeholder = { Text("コメントを入力（任意）") },
-                supportingText = { Text("${comment.length} / 100") },
-            )
         }
     }
 }
@@ -1364,10 +1479,12 @@ private fun CommentsContent(
                        */
                     }
                     val comments = if (ranked) {
-                        state.comments.sortedWith(
-                            compareByDescending<BookmarkComment> { it.stars }
-                                .thenBy { it.timestamp },
-                        )
+                        state.comments
+                            .filter { it.stars >= 1 }
+                            .sortedWith(
+                                compareByDescending<BookmarkComment> { it.stars }
+                                    .thenBy { it.timestamp },
+                            )
                     } else {
                         state.comments
                     }
@@ -1390,9 +1507,70 @@ private fun CommentsContent(
                             }
                         }
                     }
+                    if (ranked && state.relatedEntries.isNotEmpty()) {
+                        item {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 16.dp),
+                            ) {
+                                Text(
+                                    text = "あわせて読みたい",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                )
+                            }
+                        }
+                        items(state.relatedEntries) { related ->
+                            RelatedEntryItem(related = related)
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RelatedEntryItem(related: RelatedEntry) {
+    val context = LocalContext.current
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = {
+            try {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(related.articleUrl)))
+            } catch (e: Exception) {
+                // ignore
+            }
+        },
+        colors = androidx.compose.material3.CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.background,
+        ),
+    ) {
+        Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = related.title,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "${related.bookmarkCount} users",
+                    color = Color(0xFFFF4D83),
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
     }
 }
 
@@ -1519,20 +1697,22 @@ private fun PopularEntryCard(
                     )
                 }
             }
-            if (entry.imageUrl != null) {
+            val thumbnailModifier = Modifier
+                .padding(start = 12.dp)
+                .size(76.dp)
+                .clip(RoundedCornerShape(6.dp))
+
+            if (!entry.imageUrl.isNullOrBlank()) {
                 AsyncImage(
                     model = entry.imageUrl,
                     contentDescription = null,
-                    modifier = Modifier
-                        .padding(start = 12.dp)
-                        .size(88.dp),
+                    modifier = thumbnailModifier,
+                    contentScale = ContentScale.Crop,
                 )
             } else {
-                Icon(
-                    imageVector = Icons.Outlined.ChatBubbleOutline,
-                    contentDescription = null,
-                    tint = Color(0xFF5C7478),
-                    modifier = Modifier.padding(start = 12.dp),
+                Box(
+                    modifier = thumbnailModifier
+                        .background(Color(0xFF1E282B)),
                 )
             }
         }
@@ -1607,7 +1787,7 @@ private suspend fun fetchBookmarkComments(
     offset: Int,
     pageSize: Int = 10,
 ): BookmarkCommentPage {
-    val endpoint = "https://b.hatena.ne.jp/entry/jsonlite/?url=" +
+    val endpoint = "https://b.hatena.ne.jp/entry/json/?url=" +
         Uri.encode(entryUrl)
     val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
         connectTimeout = 10_000
@@ -1658,7 +1838,33 @@ private suspend fun fetchBookmarkComments(
                 }
             }.awaitAll()
         }
-        BookmarkCommentPage(comments = comments, hasMore = offset + page.size < targets.size)
+        val relatedEntries = if (offset == 0) {
+            val relatedArray = root.optJSONArray("related") ?: JSONArray()
+            buildList {
+                for (i in 0 until relatedArray.length()) {
+                    val item = relatedArray.optJSONObject(i) ?: continue
+                    val relatedEntryUrl = item.optString("entry_url").takeIf { it.isNotBlank() } ?: continue
+                    val articleUrl = relatedEntryUrl
+                        .removePrefix("https://b.hatena.ne.jp/entry/s/")
+                        .removePrefix("https://b.hatena.ne.jp/entry/")
+                        .let { if (it.startsWith("http")) it else "https://$it" }
+                    val title = item.optString("title").takeIf { it.isNotBlank() } ?: continue
+                    add(
+                        RelatedEntry(
+                            title = title,
+                            entryUrl = relatedEntryUrl,
+                            articleUrl = articleUrl,
+                            bookmarkCount = item.optInt("count"),
+                        )
+                    )
+                }
+            }
+        } else emptyList()
+        BookmarkCommentPage(
+            comments = comments,
+            hasMore = offset + page.size < targets.size,
+            relatedEntries = relatedEntries,
+        )
     } finally {
         connection.disconnect()
     }
@@ -1764,9 +1970,10 @@ private fun parsePopularEntries(xml: String): List<PopularEntry> {
                 "bookmarkcount" -> if (insideItem) {
                     bookmarkCount = parser.nextText().toIntOrNull() ?: 0
                 }
-                "thumbnail" -> if (insideItem) {
-                    imageUrl = parser.getAttributeValue(null, "rdf:resource")
+                "imageurl", "hatena:imageurl", "thumbnail" -> if (insideItem) {
+                    val resource = parser.getAttributeValue(null, "rdf:resource")
                         ?: parser.getAttributeValue(null, "resource")
+                    imageUrl = resource ?: parser.nextText().trim().takeIf { it.isNotBlank() }
                 }
                 "description" -> if (insideItem) description = parser.nextText()
             }
