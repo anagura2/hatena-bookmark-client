@@ -12,8 +12,8 @@ This repository is a native Android Hatena Bookmark client for personal use. It 
   - OAuth 1.0a flow, token persistence, authenticated profile/bookmark requests, and bookmark posting.
 - `app/src/main/AndroidManifest.xml`
   - Application metadata and launcher icon.
-- `app/src/main/res/drawable/app_icon.png`
-  - Current 512x512 launcher icon artwork.
+- `app/src/main/res/drawable/app_icon.xml`
+  - Original vector launcher icon: an open book with a bookmark on a blue rounded background.
 - `app/build.gradle.kts`
   - Android/Compose configuration and local OAuth credential injection.
 - `README.md`
