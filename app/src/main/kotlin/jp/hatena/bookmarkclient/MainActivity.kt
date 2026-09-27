@@ -616,33 +616,33 @@ private fun PopularEntriesScreen(
         }
     }
 
-        if (showMyBookmarks) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.background),
-            ) {
-                MyBookmarksScreen(
-                    oauthClient = oauthClient,
-                    onBack = { showMyBookmarks = false },
-                    onSelectEntry = { selectedEntry = it },
-                )
-            }
-        }
-
-        selectedEntry?.let { entry ->
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.background),
-            ) {
+        // Main content container
+        Box(modifier = Modifier.fillMaxSize()) {
+            // EntryWebViewScreen: always present when an entry is selected
+            selectedEntry?.let { entry ->
                 EntryWebViewScreen(
                     entry = entry,
                     oauthClient = oauthClient,
-                    onBack = { selectedEntry = null },
+                    onBack = { selectedEntry = null }
                 )
             }
+
+            // Overlay MyBookmarksScreen on top when needed
+            if (showMyBookmarks) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.background)
+                ) {
+                    MyBookmarksScreen(
+                        oauthClient = oauthClient,
+                        onBack = { showMyBookmarks = false },
+                        onSelectEntry = { selectedEntry = it }
+                    )
+                }
+            }
         }
+
     }
 }
 
