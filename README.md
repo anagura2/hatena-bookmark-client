@@ -78,6 +78,22 @@ ADB="$HOME/Library/Android/sdk/platform-tools/adb"
 
 このプロジェクトでは、リリース署名設定は用意していません。上記はデバッグ版です。
 
+## GitHub Releases
+
+`v*`形式のタグを`main`へpushすると、GitHub Actionsが署名付きRelease APKをビルドし、
+GitHub Releasesへ自動で添付します。
+
+リリース用keystoreはリポジトリへコミットせず、GitHub ActionsのSecretsへ登録してください。
+必要なSecretsは次の4つです。
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+最初のリリースに使ったkeystoreは、今後の更新でも同じものを使う必要があります。
+keystoreとパスワードは安全な場所にバックアップしてください。
+
 ## API
 
 主に以下のはてなブックマークAPI・フィードを利用しています。
