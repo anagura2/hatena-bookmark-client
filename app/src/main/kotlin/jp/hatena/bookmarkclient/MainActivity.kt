@@ -6,6 +6,7 @@ import android.net.Uri
 import android.widget.Toast
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebChromeClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -77,6 +78,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.animation.AnimatedContent
@@ -101,6 +103,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.Color
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -623,7 +626,17 @@ private fun PopularEntriesScreen(
                 EntryWebViewScreen(
                     entry = entry,
                     oauthClient = oauthClient,
-                    onBack = { selectedEntry = null }
+                    onBack = { selectedEntry = null },
+                    onSelectRelatedEntry = { related ->
+                        selectedEntry = PopularEntry(
+                            title = related.title,
+                            url = related.articleUrl,
+                            domain = Uri.parse(related.articleUrl).host ?: related.articleUrl,
+                            bookmarkCount = related.bookmarkCount,
+                            commentCount = 0,
+                            imageUrl = null,
+                        )
+                    },
                 )
             }
 
@@ -928,6 +941,7 @@ private fun EntryWebViewScreen(
     entry: PopularEntry,
     oauthClient: HatenaOAuthClient,
     onBack: () -> Unit,
+    onSelectRelatedEntry: (RelatedEntry) -> Unit,
 ) {
     var webView by remember { mutableStateOf<WebView?>(null) }
     var canGoBack by remember { mutableStateOf(false) }
@@ -935,98 +949,60 @@ private fun EntryWebViewScreen(
     var selectedCommentUri by remember { mutableStateOf<String?>(null) }
     var showBookmarkEditor by remember { mutableStateOf(false) }
     var commentsState by remember { mutableStateOf<CommentsState>(CommentsState.Loading) }
+    var currentEntry by remember(entry.url) { mutableStateOf(entry) }
+    var loadedEntryUrl by remember { mutableStateOf<String?>(null) }
+    val latestEntry by rememberUpdatedState(currentEntry)
     val scope = rememberCoroutineScope()
+    val commentDisplayBatchSize = 50
 
-    fun loadCommentsInBackground() {
-        scope.launch {
-            commentsState = CommentsState.Loading
-            try {
-                var offset = 0
-                var page = withContext(Dispatchers.IO) {
-                    fetchBookmarkComments(entry.url, offset)
+    suspend fun loadComments(url: String) {
+        commentsState = CommentsState.Loading
+        try {
+            var offset = 0
+            var page = withContext(Dispatchers.IO) {
+                fetchBookmarkComments(url, offset)
+            }
+            var accumulatedComments = page.comments
+            val relatedEntries = page.relatedEntries
+            offset += page.comments.size
+
+            while (page.hasMore) {
+                page = withContext(Dispatchers.IO) {
+                    fetchBookmarkComments(url, offset)
                 }
-                commentsState = CommentsState.Loaded(
-                    comments = page.comments,
-                    hasMore = page.hasMore,
-                    loadingMore = page.hasMore,
-                    relatedEntries = page.relatedEntries,
-                )
+                accumulatedComments += page.comments
                 offset += page.comments.size
-
-                while (page.hasMore) {
-                    page = withContext(Dispatchers.IO) {
-                        fetchBookmarkComments(entry.url, offset)
-                    }
-                    val current = commentsState
-                    if (current !is CommentsState.Loaded) return@launch
-                    commentsState = current.copy(
-                        comments = current.comments + page.comments,
+                if (accumulatedComments.size >= commentDisplayBatchSize || !page.hasMore) {
+                    commentsState = CommentsState.Loaded(
+                        comments = accumulatedComments,
                         hasMore = page.hasMore,
                         loadingMore = page.hasMore,
+                        relatedEntries = relatedEntries,
                     )
-                    offset += page.comments.size
                 }
-                val current = commentsState
-                if (current is CommentsState.Loaded) {
-                    commentsState = current.copy(loadingMore = false)
-                }
-            } catch (exception: Exception) {
-                val current = commentsState
-                commentsState = if (current is CommentsState.Loaded && current.comments.isNotEmpty()) {
-                    current.copy(loadingMore = false)
-                } else {
-                    CommentsState.Error(exception.message ?: "コメントを取得できませんでした")
-                }
+            }
+            commentsState = CommentsState.Loaded(
+                comments = accumulatedComments,
+                hasMore = false,
+                loadingMore = false,
+                relatedEntries = relatedEntries,
+            )
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            val current = commentsState
+            commentsState = if (current is CommentsState.Loaded && current.comments.isNotEmpty()) {
+                current.copy(loadingMore = false)
+            } else {
+                CommentsState.Error(exception.message ?: "コメントを取得できませんでした")
             }
         }
     }
 
-    LaunchedEffect(entry.url) {
-        loadCommentsInBackground()
+    LaunchedEffect(currentEntry.url) {
+        loadComments(currentEntry.url)
     }
 
-    if (showComments) {
-        CommentsScreen(
-            entry = entry,
-            state = commentsState,
-            onBack = { showComments = false },
-            canPostStar = oauthClient.savedTokens() != null,
-            onCommentStarClick = {
-                selectedCommentUri = it
-                showComments = false
-            },
-            onLoadMore = {
-                val current = commentsState
-                if (current is CommentsState.Loaded && !current.loadingMore && current.hasMore) {
-                    commentsState = current.copy(loadingMore = true)
-                    scope.launch {
-                        try {
-                            val nextPage = withContext(Dispatchers.IO) {
-                                fetchBookmarkComments(entry.url, current.comments.size)
-                            }
-                            val latest = commentsState
-                            if (latest is CommentsState.Loaded) {
-                                commentsState = latest.copy(
-                                    comments = latest.comments + nextPage.comments,
-                                    hasMore = nextPage.hasMore,
-                                    loadingMore = false,
-                                )
-                            }
-                        } catch (exception: Exception) {
-                            val latest = commentsState
-                            if (latest is CommentsState.Loaded) {
-                                commentsState = latest.copy(loadingMore = false)
-                            }
-                        }
-                    }
-                }
-            },
-            onRetry = {
-                loadCommentsInBackground()
-            },
-        )
-        return
-    }
     selectedCommentUri?.let { commentUri ->
         CommentWebViewScreen(
             commentUri = commentUri,
@@ -1036,7 +1012,7 @@ private fun EntryWebViewScreen(
     }
     if (showBookmarkEditor) {
         BookmarkEditorScreen(
-            entry = entry,
+            entry = currentEntry,
             oauthClient = oauthClient,
             onBack = { showBookmarkEditor = false },
         )
@@ -1051,12 +1027,13 @@ private fun EntryWebViewScreen(
         }
     }
 
-    Scaffold(
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Text(
-                        text = entry.title,
+                        text = currentEntry.title,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.titleMedium,
@@ -1130,7 +1107,7 @@ private fun EntryWebViewScreen(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "${entry.bookmarkCount}",
+                        text = "${currentEntry.bookmarkCount}",
                         color = Color(0xFFFF4D83),
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Bold,
@@ -1138,7 +1115,7 @@ private fun EntryWebViewScreen(
                 }
                 IconButton(
                     onClick = {
-                        clipboardManager.setText(AnnotatedString(entry.url))
+                        clipboardManager.setText(AnnotatedString(currentEntry.url))
                         Toast.makeText(context, "URLをコピーしました", Toast.LENGTH_SHORT).show()
                     },
                 ) {
@@ -1150,7 +1127,7 @@ private fun EntryWebViewScreen(
                 }
                 IconButton(
                     onClick = {
-                        val targetUrl = webView?.url ?: entry.url
+                        val targetUrl = webView?.url ?: currentEntry.url
                         try {
                             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl))
                             context.startActivity(intent)
@@ -1167,37 +1144,129 @@ private fun EntryWebViewScreen(
                 }
             }
         },
-    ) { innerPadding ->
-        AndroidView(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding),
-            factory = { context ->
-                WebView(context).apply {
-                    webView = this
-                    webViewClient = object : WebViewClient() {
-                        override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
-                            super.doUpdateVisitedHistory(view, url, isReload)
-                            canGoBack = view?.canGoBack() == true
+        ) { innerPadding ->
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                factory = { context ->
+                    WebView(context).apply {
+                        webView = this
+                        webViewClient = object : WebViewClient() {
+                            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                                super.doUpdateVisitedHistory(view, url, isReload)
+                                canGoBack = view?.canGoBack() == true
+                            }
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                canGoBack = view?.canGoBack() == true
+                                val navigatedUrl = url ?: return
+                                val pageView = view ?: return
+                                val navigatedTitle = pageView.title?.takeIf { it.isNotBlank() }
+                                if (latestEntry.url != navigatedUrl) {
+                                    currentEntry = latestEntry.copy(
+                                        url = navigatedUrl,
+                                        title = navigatedTitle ?: latestEntry.title,
+                                        domain = Uri.parse(navigatedUrl).host ?: navigatedUrl,
+                                        bookmarkCount = 0,
+                                    )
+                                    scope.launch {
+                                        val bookmarkCount = withContext(Dispatchers.IO) {
+                                            fetchEntryBookmarkCount(navigatedUrl)
+                                        }
+                                        if (webView?.url == navigatedUrl && latestEntry.url == navigatedUrl) {
+                                            currentEntry = latestEntry.copy(bookmarkCount = bookmarkCount)
+                                        }
+                                    }
+                                } else if (navigatedTitle != null && navigatedTitle != latestEntry.title) {
+                                    currentEntry = latestEntry.copy(title = navigatedTitle)
+                                }
+                            }
                         }
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            super.onPageFinished(view, url)
-                            canGoBack = view?.canGoBack() == true
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onReceivedTitle(view: WebView?, title: String?) {
+                                super.onReceivedTitle(view, title)
+                                val pageUrl = view?.url ?: return
+                                val pageTitle = title?.takeIf { it.isNotBlank() } ?: return
+                                if (latestEntry.url == pageUrl && latestEntry.title != pageTitle) {
+                                    currentEntry = latestEntry.copy(title = pageTitle)
+                                }
+                            }
                         }
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.loadsImagesAutomatically = true
+                        loadedEntryUrl = currentEntry.url
+                        loadUrl(currentEntry.url)
                     }
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.loadsImagesAutomatically = true
-                    loadUrl(entry.url)
-                }
-            },
-            update = { view -> webView = view },
-            onRelease = { view ->
-                view.stopLoading()
-                view.destroy()
-                webView = null
-            },
-        )
+                },
+                update = { view ->
+                    webView = view
+                    if (loadedEntryUrl != currentEntry.url) {
+                        loadedEntryUrl = currentEntry.url
+                        canGoBack = false
+                        view.loadUrl(currentEntry.url)
+                    }
+                },
+                onRelease = { view ->
+                    view.stopLoading()
+                    view.destroy()
+                    webView = null
+                },
+            )
+        }
+
+        if (showComments) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background),
+            ) {
+                CommentsScreen(
+                    entry = currentEntry,
+                    state = commentsState,
+                    onBack = { showComments = false },
+                    canPostStar = oauthClient.savedTokens() != null,
+                    onCommentStarClick = {
+                        selectedCommentUri = it
+                        showComments = false
+                    },
+                    onLoadMore = {
+                        val current = commentsState
+                        if (current is CommentsState.Loaded && !current.loadingMore && current.hasMore) {
+                            commentsState = current.copy(loadingMore = true)
+                            scope.launch {
+                                try {
+                                    val nextPage = withContext(Dispatchers.IO) {
+                                        fetchBookmarkComments(currentEntry.url, current.comments.size)
+                                    }
+                                    val latest = commentsState
+                                    if (latest is CommentsState.Loaded) {
+                                        commentsState = latest.copy(
+                                            comments = latest.comments + nextPage.comments,
+                                            hasMore = nextPage.hasMore,
+                                            loadingMore = false,
+                                        )
+                                    }
+                                } catch (exception: Exception) {
+                                    val latest = commentsState
+                                    if (latest is CommentsState.Loaded) {
+                                        commentsState = latest.copy(loadingMore = false)
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    onRetry = {
+                        scope.launch { loadComments(currentEntry.url) }
+                    },
+                    onRelatedEntryClick = {
+                        showComments = false
+                        onSelectRelatedEntry(it)
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -1369,6 +1438,7 @@ private fun CommentsScreen(
     onBack: () -> Unit,
     onRetry: () -> Unit,
     onLoadMore: () -> Unit,
+    onRelatedEntryClick: (RelatedEntry) -> Unit,
     canPostStar: Boolean,
     onCommentStarClick: (String) -> Unit,
 ) {
@@ -1424,6 +1494,7 @@ private fun CommentsScreen(
             contentPadding = innerPadding,
             onRetry = onRetry,
             onLoadMore = onLoadMore,
+            onRelatedEntryClick = onRelatedEntryClick,
             canPostStar = canPostStar,
             onCommentStarClick = onCommentStarClick,
             ranked = selectedTab == 0,
@@ -1437,6 +1508,7 @@ private fun CommentsContent(
     contentPadding: PaddingValues,
     onRetry: () -> Unit,
     onLoadMore: () -> Unit,
+    onRelatedEntryClick: (RelatedEntry) -> Unit,
     canPostStar: Boolean,
     onCommentStarClick: (String) -> Unit,
     ranked: Boolean,
@@ -1527,7 +1599,10 @@ private fun CommentsContent(
                             }
                         }
                         items(state.relatedEntries) { related ->
-                            RelatedEntryItem(related = related)
+                            RelatedEntryItem(
+                                related = related,
+                                onClick = { onRelatedEntryClick(related) },
+                            )
                         }
                     }
                 }
@@ -1537,17 +1612,13 @@ private fun CommentsContent(
 }
 
 @Composable
-private fun RelatedEntryItem(related: RelatedEntry) {
-    val context = LocalContext.current
+private fun RelatedEntryItem(
+    related: RelatedEntry,
+    onClick: () -> Unit,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        onClick = {
-            try {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(related.articleUrl)))
-            } catch (e: Exception) {
-                // ignore
-            }
-        },
+        onClick = onClick,
         colors = androidx.compose.material3.CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.background,
         ),

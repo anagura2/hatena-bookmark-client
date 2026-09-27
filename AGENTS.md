@@ -67,6 +67,14 @@ ADB="$HOME/Library/Android/sdk/platform-tools/adb"
 
 The commonly used emulator is `emulator-5554`, AVD name `Pixel_8_Pro`. When both the phone and emulator are connected, always pass `-s`.
 
+After a successful debug build, automatically deploy the APK to the emulator without waiting for a separate request:
+
+1. Check connected devices with `$HOME/Library/Android/sdk/platform-tools/adb devices -l`.
+2. Prefer `emulator-5554` when it is connected.
+3. Install with `adb -s emulator-5554 install -r app/build/outputs/apk/debug/app-debug.apk`.
+4. Launch with `adb -s emulator-5554 shell monkey -p jp.hatena.bookmarkclient 1`.
+5. If `emulator-5554` is not connected, report that deployment was skipped. Do not install to a physical device unless explicitly requested.
+
 ## Authentication
 
 The app uses Hatena OAuth 1.0a with the `oob` PIN flow. The requested scopes are:
