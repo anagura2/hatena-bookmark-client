@@ -3,6 +3,7 @@ package jp.hatena.bookmarkclient
 import android.os.Bundle
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import android.widget.Toast
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -31,6 +32,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
@@ -63,6 +65,7 @@ import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TopAppBar
@@ -88,6 +91,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.lifecycle.lifecycleScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -216,6 +220,12 @@ private fun PopularEntriesScreen(
     var selectedCategory by remember { mutableStateOf(entryCategories.first()) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     var showMyBookmarks by remember { mutableStateOf(false) }
+    var showNotifications by remember { mutableStateOf(false) }
+    var hasUnreadNotifications by remember { mutableStateOf(false) }
+    val notificationPreferences = LocalContext.current.getSharedPreferences(
+        "notification_state",
+        0,
+    )
 
     fun loadEntries(category: EntryCategory = selectedCategory, forceReload: Boolean = false) {
         if (!forceReload && categoryStates[category.feedUrl] is EntriesState.Loaded) {
@@ -247,6 +257,21 @@ private fun PopularEntriesScreen(
         }
     }
 
+    LaunchedEffect(oauthLoggedIn) {
+        if (!oauthLoggedIn) {
+            hasUnreadNotifications = false
+        } else {
+            try {
+                val notifications = withContext(Dispatchers.IO) {
+                    oauthClient.fetchNotifications()
+                }
+                val lastRead = notificationPreferences.getLong("last_read_created", 0L)
+                hasUnreadNotifications = notifications.any { it.createdAt > lastRead }
+            } catch (_: Exception) {
+                hasUnreadNotifications = false
+            }
+        }
+    }
 
     if (oauthLoading) {
         AlertDialog(
@@ -364,6 +389,16 @@ private fun PopularEntriesScreen(
                             }
                         }
                     )
+                    DrawerItem(
+                        label = "通知",
+                        selected = false,
+                        enabled = oauthLoggedIn,
+                        hasBadge = hasUnreadNotifications,
+                        onClick = {
+                            showNotifications = true
+                            scope.launch { drawerState.close() }
+                        },
+                    )
                     DrawerItem("設定", false, enabled = false) {}
                 }
             }
@@ -437,14 +472,8 @@ private fun PopularEntriesScreen(
             AnimatedContent(
                 targetState = selectedCategory,
                 transitionSpec = {
-                    (slideInHorizontally(
-                        animationSpec = tween(300),
-                        initialOffsetX = { it / 3 },
-                    ) + fadeIn(animationSpec = tween(300))).togetherWith(
-                        slideOutHorizontally(
-                            animationSpec = tween(300),
-                            targetOffsetX = { -it / 3 },
-                        ) + fadeOut(animationSpec = tween(200)),
+                    fadeIn(animationSpec = tween(220)).togetherWith(
+                        fadeOut(animationSpec = tween(160)),
                     )
                 },
                 label = "category-content",
@@ -490,8 +519,6 @@ private fun PopularEntriesScreen(
                             }
                             }
                             }
-                        }
-
                     }
                 }
             }
@@ -547,8 +574,148 @@ private fun PopularEntriesScreen(
                     )
                 }
             }
+                if (showNotifications) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.background),
+                    ) {
+                        NotificationsScreen(
+                            oauthClient = oauthClient,
+                            onBack = { showNotifications = false },
+                            onOpened = {
+                                hasUnreadNotifications = false
+                                notificationPreferences.edit()
+                                    .putLong("last_read_created", it)
+                                    .apply()
+                            },
+                        )
+                    }
+                }
+            }
+
         }
 
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun NotificationsScreen(
+    oauthClient: HatenaOAuthClient,
+    onBack: () -> Unit,
+    onOpened: (Long) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var state by remember { mutableStateOf<NotificationsState>(NotificationsState.Loading) }
+    BackHandler(onBack = onBack)
+
+    fun loadNotifications() {
+        state = NotificationsState.Loading
+        scope.launch {
+            state = try {
+                NotificationsState.Loaded(
+                    withContext(Dispatchers.IO) { oauthClient.fetchNotifications() },
+                )
+            } catch (exception: Exception) {
+                NotificationsState.Error(exception.message ?: "通知を取得できませんでした")
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) { loadNotifications() }
+    Scaffold(
+        containerColor = Color(0xFFF5FAFA),
+        topBar = {
+            TopAppBar(
+                title = { Text("通知", fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.White,
+                    titleContentColor = Color(0xFF17383C),
+                    navigationIconContentColor = Color(0xFF17383C),
+                ),
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Outlined.ArrowBack, contentDescription = "戻る")
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        when (val currentState = state) {
+            NotificationsState.Loading -> LoadingContent(padding)
+            is NotificationsState.Error -> ErrorContent(
+                message = currentState.message,
+                contentPadding = padding,
+                onRetry = ::loadNotifications,
+            )
+            is NotificationsState.Loaded -> {
+                LaunchedEffect(currentState.items) {
+                    currentState.items.maxOfOrNull { it.createdAt }?.let(onOpened)
+                }
+                if (currentState.items.isEmpty()) {
+                    ErrorContent(
+                        message = "通知はありません",
+                        contentPadding = padding,
+                        onRetry = ::loadNotifications,
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(padding)
+                            .background(Color(0xFFF5FAFA)),
+                        contentPadding = PaddingValues(bottom = 24.dp),
+                    ) {
+                        items(currentState.items) { notification ->
+                            NotificationRow(notification)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotificationRow(notification: HatenaNotification) {
+    val userText = when {
+        notification.users.isEmpty() -> "誰か"
+        notification.users.size == 1 -> "${notification.users.first()}さん"
+        else -> notification.users.take(3).joinToString("さん、", postfix = "さん")
+    }
+    val message = if (notification.verb == "star") {
+        "${userText}があなたのブックマークに★をつけました"
+    } else {
+        "${userText}から通知があります"
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 34.dp, vertical = 22.dp),
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Text(
+                text = message,
+                modifier = Modifier.weight(1f),
+                color = Color(0xFF17383C),
+                fontSize = 16.sp,
+                lineHeight = 23.sp,
+            )
+        }
+        if (notification.subjectTitle.isNotBlank()) {
+            Text(
+                text = notification.subjectTitle,
+                modifier = Modifier.padding(top = 8.dp),
+                color = Color(0xFF496568),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        HorizontalDivider(
+            modifier = Modifier.padding(top = 22.dp),
+            color = Color(0xFFD3D0D5),
+        )
     }
 }
 
@@ -561,17 +728,26 @@ private fun MyBookmarksScreen(
 ) {
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf<MyBookmarksState>(MyBookmarksState.Loading) }
+    var selectedTab by rememberSaveable { mutableStateOf(0) }
+    var currentUserName by remember { mutableStateOf("") }
     val pageSize = 50
     BackHandler(onBack = onBack)
 
-    suspend fun enrichBookmarks(bookmarks: List<MyBookmarkEntry>): List<MyBookmarkEntry> =
+    suspend fun enrichBookmarks(
+        bookmarks: List<MyBookmarkEntry>,
+        userName: String,
+    ): List<MyBookmarkEntry> =
         withContext(Dispatchers.IO) {
             bookmarks.map { bookmark ->
                 async {
-                    bookmark.copy(
+                    val enriched = bookmark.copy(
                         bookmarkCount = fetchEntryBookmarkCount(bookmark.url),
-                        starCount = fetchMyBookmarkStarCount(bookmark),
+                        starCount = fetchMyBookmarkStarCount(bookmark, userName),
                     )
+                    if (enriched.commentUri.contains("4793011382430096898")) {
+                        Log.d("MyBookmarkStars", "enriched ${enriched.url} starCount=${enriched.starCount}")
+                    }
+                    enriched
                 }
             }.awaitAll()
         }
@@ -581,8 +757,10 @@ private fun MyBookmarksScreen(
         scope.launch {
             state = try {
                 val json = withContext(Dispatchers.IO) { oauthClient.fetchMyBookmarks() }
+                val userName = withContext(Dispatchers.IO) { oauthClient.fetchMyUserName() }
+                currentUserName = userName
                 val bookmarks = parseMyBookmarks(json)
-                val firstPage = enrichBookmarks(bookmarks.take(pageSize))
+                val firstPage = enrichBookmarks(bookmarks.take(pageSize), userName)
                 MyBookmarksState.Loaded(
                     entries = firstPage,
                     allEntries = bookmarks,
@@ -614,30 +792,77 @@ private fun MyBookmarksScreen(
             )
         },
     ) { padding ->
-        when (val currentState = state) {
-            MyBookmarksState.Loading -> LoadingContent(padding)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                listOf("すべて", "あとで読む").forEachIndexed { index, label ->
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { selectedTab = index },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (selectedTab == index) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            modifier = Modifier.padding(vertical = 12.dp),
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(2.dp)
+                                .background(
+                                    if (selectedTab == index) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        Color.Transparent
+                                    },
+                                ),
+                        )
+                    }
+                }
+            }
+            when (val currentState = state) {
+            MyBookmarksState.Loading -> LoadingContent(PaddingValues())
             is MyBookmarksState.Error -> ErrorContent(
                 message = currentState.message,
-                contentPadding = padding,
+                contentPadding = PaddingValues(),
                 onRetry = ::loadBookmarks,
             )
             is MyBookmarksState.Loaded -> {
-                if (currentState.entries.isEmpty()) {
+                val visibleEntries = if (selectedTab == 1) {
+                    currentState.allEntries.filter { entry ->
+                        entry.tags.any { tag -> tag.trim() == "あとで読む" }
+                    }
+                } else {
+                    currentState.entries
+                }
+                if (visibleEntries.isEmpty()) {
                     ErrorContent(
                         message = "ブックマークがありません",
-                        contentPadding = padding,
+                        contentPadding = PaddingValues(),
                         onRetry = ::loadBookmarks,
                     )
                 } else {
                     val listState = rememberLazyListState()
                     LazyColumn(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .padding(padding),
+                            .fillMaxSize(),
                         state = listState,
                         contentPadding = PaddingValues(bottom = 24.dp),
                     ) {
-                        items(currentState.entries, key = { it.url }) { bookmark ->
+                        items(visibleEntries, key = { it.url }) { bookmark ->
+                            if (bookmark.url == "https://onaji.me/entry/2026/09/14") {
+                                Log.d("MyBookmarkStars", "render ${bookmark.url} starCount=${bookmark.starCount}")
+                            }
                             val parsedUrl = Uri.parse(bookmark.url)
                             PopularEntryCard(
                                 entry = PopularEntry(
@@ -666,13 +891,28 @@ private fun MyBookmarksScreen(
                                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
-                                    Text(text = bookmark.comment, color = Color(0xFFB8C5C7))
+                                    Text(
+                                        text = bookmark.comment,
+                                        modifier = Modifier.weight(1f),
+                                        color = Color(0xFFB8C5C7),
+                                        maxLines = 3,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                     if (bookmark.starCount > 0) {
-                                        Text(
-                                            text = "★ ${bookmark.starCount}",
-                                            color = Color(0xFFFFD21C),
-                                            fontWeight = FontWeight.Medium,
-                                        )
+                                        Surface(
+                                            color = Color(0xFFFFF3B0),
+                                            shape = RoundedCornerShape(4.dp),
+                                        ) {
+                                            Text(
+                                                text = "★ ${bookmark.starCount}",
+                                                modifier = Modifier.padding(
+                                                    horizontal = 6.dp,
+                                                    vertical = 2.dp,
+                                                ),
+                                                color = Color(0xFF8A6500),
+                                                fontWeight = FontWeight.Bold,
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -703,7 +943,7 @@ private fun MyBookmarksScreen(
                                     .take(pageSize)
                                 state = currentState.copy(loadingMore = true)
                                 scope.launch {
-                                    val enrichedNextEntries = enrichBookmarks(nextEntries)
+                                    val enrichedNextEntries = enrichBookmarks(nextEntries, currentUserName)
                                     val latest = state
                                     if (latest is MyBookmarksState.Loaded) {
                                         state = latest.copy(
@@ -713,6 +953,7 @@ private fun MyBookmarksScreen(
                                             loadingMore = false,
                                         )
                                     }
+                                }
                                 }
                             }
                         }
@@ -728,15 +969,29 @@ private fun DrawerItem(
         label: String,
         selected: Boolean,
         enabled: Boolean = true,
+        hasBadge: Boolean = false,
         onClick: () -> Unit,
 ) {
         NavigationDrawerItem(
             label = {
-                Text(
-                    text = label,
-                    fontSize = 12.sp,
-                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = label,
+                        fontSize = 12.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                    )
+                    if (hasBadge) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFE53935)),
+                        )
+                    }
+                }
             },
             selected = selected,
             onClick = if (enabled) onClick else ({}),
@@ -765,6 +1020,9 @@ private fun CategoryTabs(
     val scrollState = rememberScrollState()
     val repeatedCategories = List(3) { entryCategories }.flatten()
     val middleBlockStart = entryCategories.size
+    var selectedTabIndex by remember {
+        mutableStateOf(middleBlockStart + entryCategories.indexOf(selectedCategory))
+    }
     fun tabWidth(category: EntryCategory): Dp =
         if (category.label == "アニメとゲーム") 176.dp else 112.dp
     BoxWithConstraints(
@@ -777,10 +1035,31 @@ private fun CategoryTabs(
         val scope = rememberCoroutineScope()
         val density = androidx.compose.ui.platform.LocalDensity.current
         LaunchedEffect(selectedCategory, maxWidth) {
-            val selectedIndex = entryCategories.indexOf(selectedCategory)
+            val selectedIndex = if (
+                selectedTabIndex in repeatedCategories.indices &&
+                repeatedCategories[selectedTabIndex] == selectedCategory
+            ) {
+                selectedTabIndex
+            } else {
+                with(density) {
+                    val viewportCenter = scrollState.value + maxWidth.toPx() / 2f
+                    repeatedCategories.indices
+                        .filter { repeatedCategories[it] == selectedCategory }
+                        .minByOrNull { index ->
+                            val precedingWidth = repeatedCategories
+                                .take(index)
+                                .sumOf { tabWidth(it).toPx().toDouble() }
+                            kotlin.math.abs(
+                                precedingWidth + tabWidth(selectedCategory).toPx() / 2f -
+                                    viewportCenter,
+                            )
+                        }
+                        ?: (middleBlockStart + entryCategories.indexOf(selectedCategory))
+                }
+            }
+            selectedTabIndex = selectedIndex
             val target = with(density) {
-                val precedingWidth = repeatedCategories
-                    .take(middleBlockStart + selectedIndex)
+                val precedingWidth = repeatedCategories.take(selectedIndex)
                     .sumOf { tabWidth(it).toPx().toDouble() }
                     .toFloat()
                 val selectedWidth = tabWidth(selectedCategory).toPx()
@@ -788,7 +1067,10 @@ private fun CategoryTabs(
                     .toInt()
             }
             scope.launch {
-                scrollState.animateScrollTo(target.coerceIn(0, scrollState.maxValue), tween(350))
+                scrollState.animateScrollTo(
+                    target.coerceIn(0, scrollState.maxValue),
+                    tween(650, easing = FastOutSlowInEasing),
+                )
             }
         }
         Row(
@@ -800,7 +1082,10 @@ private fun CategoryTabs(
                 Column(
                     modifier = Modifier
                         .width(tabWidth(category))
-                        .clickable { onCategorySelected(category) }
+                        .clickable {
+                            selectedTabIndex = index
+                            onCategorySelected(category)
+                        }
                 ) {
                     Text(
                         text = category.label,
@@ -821,9 +1106,9 @@ private fun CategoryTabs(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(if (category == selectedCategory) 3.dp else 0.dp)
+                            .height(if (index == selectedTabIndex) 3.dp else 0.dp)
                             .background(
-                                if (category == selectedCategory) {
+                                    if (index == selectedTabIndex) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
                                     Color.Transparent

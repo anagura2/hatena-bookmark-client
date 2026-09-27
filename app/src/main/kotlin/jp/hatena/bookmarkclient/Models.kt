@@ -8,6 +8,8 @@ internal data class PopularEntry(
     val commentCount: Int,
     val imageUrl: String?,
     val comment: String = "",
+    val tags: List<String> = emptyList(),
+    val commentUri: String = "",
 )
 
 internal data class BookmarkComment(
@@ -45,12 +47,28 @@ internal data class MyBookmarkEntry(
     val createdAt: String,
     val bookmarkCount: Int,
     val starCount: Int = 0,
+    val tags: List<String> = emptyList(),
+    val commentUri: String = "",
 )
 
 internal data class HatenaTag(
     val name: String,
     val count: Int,
 )
+
+internal data class HatenaNotification(
+    val verb: String,
+    val subject: String,
+    val subjectTitle: String,
+    val users: List<String>,
+    val createdAt: Long,
+)
+
+internal sealed interface NotificationsState {
+    data object Loading : NotificationsState
+    data class Loaded(val items: List<HatenaNotification>) : NotificationsState
+    data class Error(val message: String) : NotificationsState
+}
 
 internal sealed interface BookmarkPostState {
     data object Idle : BookmarkPostState

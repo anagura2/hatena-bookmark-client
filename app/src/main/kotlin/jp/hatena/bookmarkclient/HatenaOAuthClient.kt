@@ -65,7 +65,114 @@ internal class HatenaOAuthClient(
             error("はてなユーザーIDを取得できませんでした")
         }
         val feedUrl = "https://b.hatena.ne.jp/${percentEncode(userName)}/rss"
-        return fetchPublicFeed(feedUrl)
+        val items = buildString {
+            for (offset in 0 until 100 step 20) {
+                val page = fetchPublicFeed("$feedUrl?of=$offset")
+                val pageItems = Regex("(?s)<item\\b.*?</item>").findAll(page).map { it.value }.toList()
+                if (pageItems.isEmpty()) break
+                append(pageItems.joinToString("\n"))
+                if (pageItems.size < 20) break
+            }
+        }
+        return """
+            <rss xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+                 xmlns:dc="http://purl.org/dc/elements/1.1/"
+                 xmlns:taxo="http://purl.org/rss/1.0/modules/taxonomy/"
+                 xmlns:hatena="http://www.hatena.ne.jp/info/xmlns#"
+                 xmlns:content="http://purl.org/rss/1.0/modules/content/"
+                 xmlns:syn="http://purl.org/rss/1.0/modules/syndication/"
+                 xmlns:admin="http://webns.net/mvcb/">
+                <channel>$items</channel>
+            </rss>
+        """.trimIndent()
+    }
+
+    fun fetchMyUserName(): String {
+        val tokens = savedTokens() ?: error("はてなにログインしてください")
+        val parameters = mapOf(
+            "oauth_consumer_key" to consumerKey,
+            "oauth_nonce" to randomNonce(),
+            "oauth_signature_method" to "HMAC-SHA1",
+            "oauth_timestamp" to (System.currentTimeMillis() / 1000L).toString(),
+            "oauth_token" to tokens.token,
+            "oauth_version" to "1.0",
+        )
+        return JSONObject(
+            request(
+                method = "GET",
+                endpoint = HatenaProfileEndpoint,
+                parameters = parameters,
+                tokenSecret = tokens.tokenSecret,
+            ),
+        ).optString("url_name").ifBlank {
+            error("はてなユーザーIDを取得できませんでした")
+        }
+    }
+
+    fun fetchNotifications(): List<HatenaNotification> {
+        val tokens = savedTokens() ?: error("はてなにログインしてください")
+        val parameters = mapOf(
+            "oauth_consumer_key" to consumerKey,
+            "oauth_nonce" to randomNonce(),
+            "oauth_signature_method" to "HMAC-SHA1",
+            "oauth_timestamp" to (System.currentTimeMillis() / 1000L).toString(),
+            "oauth_token" to tokens.token,
+            "oauth_version" to "1.0",
+        )
+        val response = request(
+            method = "GET",
+            endpoint = NotificationsEndpoint,
+            parameters = parameters,
+            tokenSecret = tokens.tokenSecret,
+        )
+        val trimmedResponse = response.trim()
+        val items = if (trimmedResponse.startsWith("[")) {
+            JSONArray(trimmedResponse)
+        } else {
+            val root = JSONObject(trimmedResponse)
+            root.optJSONArray("notices")
+                ?: root.optJSONArray("notifications")
+                ?: root.optJSONArray("entries")
+                ?: root.optJSONArray("items")
+                ?: JSONArray().apply { put(root) }
+        }
+        return buildList {
+            for (index in 0 until items.length()) {
+                val item = items.optJSONObject(index) ?: continue
+                val users = buildList {
+                    collectNotificationUsers(item, this)
+                }.distinct()
+                add(
+                    HatenaNotification(
+                        verb = item.optString("verb"),
+                        subject = item.optString("subject"),
+                        subjectTitle = item.optJSONObject("metadata")?.optString("subject_title").orEmpty(),
+                        users = users,
+                        createdAt = item.optLong("created"),
+                    ),
+                )
+            }
+        }.sortedByDescending { it.createdAt }
+    }
+
+    private fun collectNotificationUsers(value: Any?, users: MutableList<String>) {
+        when (value) {
+            is JSONArray -> {
+                for (index in 0 until value.length()) {
+                    collectNotificationUsers(value.opt(index), users)
+                }
+            }
+            is JSONObject -> {
+                listOf("user", "user_name", "username", "screen_name").forEach { key ->
+                    value.optString(key).takeIf { it.isNotBlank() }?.let(users::add)
+                }
+                listOf("object", "actor", "author", "user").forEach { key ->
+                    if (value.has(key)) {
+                        collectNotificationUsers(value.opt(key), users)
+                    }
+                }
+            }
+        }
     }
 
     fun addBookmark(url: String, comment: String, tags: List<String> = emptyList()) {
@@ -338,5 +445,6 @@ internal class HatenaOAuthClient(
         const val HatenaProfileEndpoint = "https://n.hatena.com/applications/my.json"
         const val MyBookmarkEndpoint = "https://bookmark.hatenaapis.com/rest/1/my/bookmark"
         const val MyTagsEndpoint = "https://bookmark.hatenaapis.com/rest/1/my/tags"
+        const val NotificationsEndpoint = "https://www.hatena.ne.jp/notify/api/pull"
     }
 }

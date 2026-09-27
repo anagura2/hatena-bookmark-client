@@ -1,6 +1,7 @@
 package jp.hatena.bookmarkclient
 
 import android.net.Uri
+import android.util.Log
 import android.util.Xml
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -42,6 +43,8 @@ internal fun parseMyBookmarks(json: String): List<MyBookmarkEntry> {
                 comment = entry.comment,
                 createdAt = "",
                 bookmarkCount = entry.bookmarkCount,
+                tags = entry.tags,
+                commentUri = entry.commentUri,
             )
         }
     }
@@ -60,6 +63,25 @@ internal fun parseMyBookmarks(json: String): List<MyBookmarkEntry> {
             val item = items.optJSONObject(index) ?: continue
             val url = item.optString("url").trim()
             if (url.isBlank()) continue
+            val tags = buildList {
+                val values = item.optJSONArray("tags")
+                if (values != null) {
+                    for (tagIndex in 0 until values.length()) {
+                        val value = values.opt(tagIndex)
+                        val tag = when (value) {
+                            is JSONObject -> value.optString("tag")
+                            else -> value?.toString().orEmpty()
+                        }
+                        tag.trim().takeIf { it.isNotBlank() }?.let(::add)
+                    }
+                } else {
+                    item.optString("tags")
+                        .split(',', ' ')
+                        .map(String::trim)
+                        .filter(String::isNotBlank)
+                        .forEach(::add)
+                }
+            }
             add(
                 MyBookmarkEntry(
                     url = url,
@@ -69,6 +91,10 @@ internal fun parseMyBookmarks(json: String): List<MyBookmarkEntry> {
                         item.optString("createdAt")
                     },
                     bookmarkCount = item.optInt("count"),
+                    tags = tags,
+                    commentUri = item.optString("comment_uri").ifBlank {
+                        item.optString("bookmark_uri")
+                    },
                 ),
             )
         }
@@ -185,9 +211,14 @@ internal fun fetchCommentStarCount(commentUri: String): Int {
     }
 }
 
-internal fun fetchMyBookmarkStarCount(bookmark: MyBookmarkEntry): Int {
+internal fun fetchMyBookmarkStarCount(bookmark: MyBookmarkEntry, userName: String): Int {
     if (bookmark.comment.isBlank()) return 0
-    val endpoint = "https://b.hatena.ne.jp/entry/jsonlite/?url=" + Uri.encode(bookmark.url)
+    if (bookmark.commentUri.isNotBlank()) {
+        val stars = fetchCommentStarCount(bookmark.commentUri)
+        Log.d("MyBookmarkStars", "${bookmark.commentUri} -> $stars")
+        return stars
+    }
+    val endpoint = "https://b.hatena.ne.jp/entry/json/?url=" + Uri.encode(bookmark.url)
     val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
         connectTimeout = 10_000
         readTimeout = 10_000
@@ -200,11 +231,14 @@ internal fun fetchMyBookmarkStarCount(bookmark: MyBookmarkEntry): Int {
         val root = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
         val entryId = root.optString("eid")
         val bookmarks = root.optJSONArray("bookmarks") ?: return 0
+        val targetComment = normalizeBookmarkComment(bookmark.comment)
         for (index in 0 until bookmarks.length()) {
             val item = bookmarks.optJSONObject(index) ?: continue
-            if (item.optString("comment").trim() != bookmark.comment) continue
+            if (item.optString("user") != userName ||
+                normalizeBookmarkComment(item.optString("comment")) != targetComment
+            ) continue
             val user = item.optString("user")
-            val date = item.optString("timestamp").replace("/", "").take(8)
+            val date = item.optString("timestamp").take(10).replace(Regex("[^0-9]"), "")
             if (entryId.isBlank() || user.isBlank() || date.length != 8) return 0
             return fetchCommentStarCount(
                 "https://b.hatena.ne.jp/$user/$date#bookmark-$entryId",
@@ -215,6 +249,13 @@ internal fun fetchMyBookmarkStarCount(bookmark: MyBookmarkEntry): Int {
         connection.disconnect()
     }
 }
+
+private fun normalizeBookmarkComment(comment: String): String =
+    comment
+        .replace(Regex("<[^>]+>"), "")
+        .replace("&nbsp;", " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
 
 internal fun fetchEntryBookmarkCount(entryUrl: String): Int {
     val endpoint = "https://b.hatena.ne.jp/entry/jsonlite/?url=" + Uri.encode(entryUrl)
@@ -246,6 +287,8 @@ internal fun parsePopularEntries(xml: String): List<PopularEntry> {
     var bookmarkCount = 0
     var imageUrl: String? = null
     var description = ""
+    val tags = mutableListOf<String>()
+    var commentUri = ""
 
     while (eventType != XmlPullParser.END_DOCUMENT) {
         when (eventType) {
@@ -257,6 +300,18 @@ internal fun parsePopularEntries(xml: String): List<PopularEntry> {
                     bookmarkCount = 0
                     imageUrl = null
                     description = ""
+                    tags.clear()
+                    commentUri = parser.getAttributeValue(
+                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+                        "about",
+                    ) ?: parser.getAttributeValue(null, "rdf:about")
+                        ?: (0 until parser.attributeCount)
+                            .firstNotNullOfOrNull { index ->
+                                val name = parser.getAttributeName(index)
+                                parser.getAttributeValue(index)
+                                    .takeIf { name == "about" || name.endsWith(":about") }
+                            }
+                            .orEmpty()
                 }
                 "title" -> if (insideItem) title = parser.nextText()
                 "link" -> if (insideItem) url = parser.nextText()
@@ -269,6 +324,9 @@ internal fun parsePopularEntries(xml: String): List<PopularEntry> {
                     imageUrl = resource ?: parser.nextText().trim().takeIf { it.isNotBlank() }
                 }
                 "description" -> if (insideItem) description = parser.nextText()
+                "category", "subject", "dc:subject" -> if (insideItem) {
+                    parser.nextText().trim().takeIf { it.isNotBlank() }?.let(tags::add)
+                }
             }
             XmlPullParser.END_TAG -> if (parser.name == "item" && insideItem) {
                 if (url.isNotBlank()) {
@@ -280,6 +338,8 @@ internal fun parsePopularEntries(xml: String): List<PopularEntry> {
                         commentCount = 0,
                         imageUrl = imageUrl,
                         comment = description,
+                        tags = tags.toList(),
+                        commentUri = commentUri,
                     )
                 }
                 insideItem = false
