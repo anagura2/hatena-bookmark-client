@@ -11,6 +11,11 @@ import android.webkit.WebChromeClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -73,6 +78,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -137,7 +143,7 @@ class MainActivity : ComponentActivity() {
         readUrls = readPreferences.getStringSet("urls", emptySet()).orEmpty()
         setContent {
             HatenaBookmarkTheme {
-                PopularEntriesScreen(
+                HatenaBookmarkNavHost(
                     oauthClient = oauthClient,
                     oauthError = oauthError,
                     oauthLoading = oauthLoading,
@@ -198,6 +204,163 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private const val HOME_ROUTE = "home"
+private const val BOOKMARKS_ROUTE = "bookmarks"
+private const val NOTIFICATIONS_ROUTE = "notifications"
+private const val ENTRY_ROUTE = "entry"
+private const val COMMENT_ROUTE = "comment"
+
+private class RetainedWebViewStore {
+    private val views = mutableMapOf<String, WebView>()
+
+    fun obtain(context: android.content.Context, key: String): WebView =
+        views.getOrPut(key) { WebView(context.applicationContext) }
+
+    fun destroyAll() {
+        views.values.forEach { view ->
+            view.stopLoading()
+            view.destroy()
+        }
+        views.clear()
+    }
+}
+
+private class MyBookmarksStateHolder {
+    var state by mutableStateOf<MyBookmarksState>(MyBookmarksState.Loading)
+    var currentUserName by mutableStateOf("")
+}
+
+@Composable
+private fun HatenaBookmarkNavHost(
+    oauthClient: HatenaOAuthClient,
+    oauthError: String?,
+    oauthLoading: Boolean,
+    oauthWaitingForVerifier: Boolean,
+    oauthLoggedIn: Boolean,
+    onOAuthErrorDismiss: () -> Unit,
+    onOAuthLogin: () -> Unit,
+    onVerifierSubmit: (String) -> Unit,
+    onLogout: () -> Unit,
+    readUrls: Set<String>,
+    onEntryOpened: (String) -> Unit,
+) {
+    val navController = rememberNavController()
+    val webViewStore = remember { RetainedWebViewStore() }
+    val myBookmarksStateHolder = remember { MyBookmarksStateHolder() }
+    DisposableEffect(Unit) {
+        onDispose { webViewStore.destroyAll() }
+    }
+    val notificationPreferences = LocalContext.current.getSharedPreferences(
+        "notification_state",
+        0,
+    )
+
+    fun openEntry(entry: PopularEntry) {
+        navController.navigate(
+            "$ENTRY_ROUTE?url=${Uri.encode(entry.url)}" +
+                "&title=${Uri.encode(entry.title)}" +
+                "&domain=${Uri.encode(entry.domain)}" +
+                "&bookmarkCount=${entry.bookmarkCount}" +
+                "&commentCount=${entry.commentCount}",
+        )
+    }
+
+    NavHost(navController = navController, startDestination = HOME_ROUTE) {
+        composable(HOME_ROUTE) {
+            PopularEntriesScreen(
+                oauthClient = oauthClient,
+                oauthError = oauthError,
+                oauthLoading = oauthLoading,
+                oauthWaitingForVerifier = oauthWaitingForVerifier,
+                oauthLoggedIn = oauthLoggedIn,
+                onOAuthErrorDismiss = onOAuthErrorDismiss,
+                onOAuthLogin = onOAuthLogin,
+                onVerifierSubmit = onVerifierSubmit,
+                onLogout = onLogout,
+                readUrls = readUrls,
+                onEntryOpened = onEntryOpened,
+                onOpenMyBookmarks = { navController.navigate(BOOKMARKS_ROUTE) },
+                onOpenNotifications = { navController.navigate(NOTIFICATIONS_ROUTE) },
+                onOpenEntry = ::openEntry,
+            )
+        }
+        composable(BOOKMARKS_ROUTE) {
+            MyBookmarksScreen(
+                oauthClient = oauthClient,
+                stateHolder = myBookmarksStateHolder,
+                onBack = { navController.popBackStack() },
+                onSelectEntry = ::openEntry,
+                onSelectComment = {
+                    navController.navigate("$COMMENT_ROUTE?uri=${Uri.encode(it)}")
+                },
+            )
+        }
+        composable(NOTIFICATIONS_ROUTE) {
+            NotificationsScreen(
+                oauthClient = oauthClient,
+                onBack = { navController.popBackStack() },
+                onNotificationClick = {
+                    navController.navigate("$COMMENT_ROUTE?uri=${Uri.encode(it)}")
+                },
+                onOpened = { createdAt ->
+                    notificationPreferences.edit()
+                        .putLong("last_read_created", createdAt)
+                        .apply()
+                },
+            )
+        }
+        composable(
+            route = "$ENTRY_ROUTE?url={url}&title={title}&domain={domain}" +
+                "&bookmarkCount={bookmarkCount}&commentCount={commentCount}",
+            arguments = listOf(
+                navArgument("url") { type = NavType.StringType },
+                navArgument("title") { type = NavType.StringType },
+                navArgument("domain") { type = NavType.StringType },
+                navArgument("bookmarkCount") { type = NavType.IntType },
+                navArgument("commentCount") { type = NavType.IntType },
+            ),
+        ) { backStackEntry ->
+            val arguments = backStackEntry.arguments ?: return@composable
+            val initialEntry = PopularEntry(
+                title = arguments.getString("title").orEmpty(),
+                url = arguments.getString("url").orEmpty(),
+                domain = arguments.getString("domain").orEmpty(),
+                bookmarkCount = arguments.getInt("bookmarkCount"),
+                commentCount = arguments.getInt("commentCount"),
+                imageUrl = null,
+            )
+            var selectedEntry by remember(initialEntry.url) { mutableStateOf(initialEntry) }
+            EntryWebViewScreen(
+                entry = selectedEntry,
+                oauthClient = oauthClient,
+                webViewStore = webViewStore,
+                onBack = { navController.popBackStack() },
+                onSelectRelatedEntry = { related ->
+                    selectedEntry = PopularEntry(
+                        title = related.title,
+                        url = related.articleUrl,
+                        domain = Uri.parse(related.articleUrl).host ?: related.articleUrl,
+                        bookmarkCount = related.bookmarkCount,
+                        commentCount = 0,
+                        imageUrl = null,
+                    )
+                },
+            )
+        }
+        composable(
+            route = "$COMMENT_ROUTE?uri={uri}",
+            arguments = listOf(navArgument("uri") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            val commentUri = backStackEntry.arguments?.getString("uri").orEmpty()
+            CommentWebViewScreen(
+                commentUri = commentUri,
+                webViewStore = webViewStore,
+                onBack = { navController.popBackStack() },
+            )
+        }
+    }
+}
+
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun PopularEntriesScreen(
@@ -212,15 +375,15 @@ private fun PopularEntriesScreen(
     onLogout: () -> Unit,
     readUrls: Set<String>,
     onEntryOpened: (String) -> Unit,
+    onOpenMyBookmarks: () -> Unit,
+    onOpenNotifications: () -> Unit,
+    onOpenEntry: (PopularEntry) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val categoryStates = remember { mutableStateMapOf<String, EntriesState>() }
     val listStates = remember { mutableMapOf<String, LazyListState>() }
-    var selectedEntry by remember { mutableStateOf<PopularEntry?>(null) }
     var selectedCategory by remember { mutableStateOf(entryCategories.first()) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    var showMyBookmarks by remember { mutableStateOf(false) }
-    var showNotifications by remember { mutableStateOf(false) }
     var hasUnreadNotifications by remember { mutableStateOf(false) }
     val notificationPreferences = LocalContext.current.getSharedPreferences(
         "notification_state",
@@ -395,7 +558,8 @@ private fun PopularEntriesScreen(
                         enabled = oauthLoggedIn,
                         hasBadge = hasUnreadNotifications,
                         onClick = {
-                            showNotifications = true
+                            hasUnreadNotifications = false
+                            onOpenNotifications()
                             scope.launch { drawerState.close() }
                         },
                     )
@@ -513,7 +677,7 @@ private fun PopularEntriesScreen(
                                     isRead = entry.url in readUrls,
                                     onClick = {
                                         onEntryOpened(entry.url)
-                                        selectedEntry = entry
+                                        onOpenEntry(entry)
                                     },
                                 )
                             }
@@ -527,7 +691,7 @@ private fun PopularEntriesScreen(
                 contentAlignment = Alignment.BottomEnd,
             ) {
                 FloatingActionButton(
-                    onClick = { showMyBookmarks = true },
+                    onClick = onOpenMyBookmarks,
                     modifier = Modifier.padding(end = 20.dp, bottom = 20.dp),
                     containerColor = Color(0xFF00B8C8),
                     contentColor = Color.White,
@@ -535,68 +699,11 @@ private fun PopularEntriesScreen(
                     Icon(Icons.Outlined.BookmarkBorder, contentDescription = "ブックマーク")
                 }
             }
-
         }
     }
 
-        // Main content container
-        Box(modifier = Modifier.fillMaxSize()) {
-            // EntryWebViewScreen: always present when an entry is selected
-            selectedEntry?.let { entry ->
-                EntryWebViewScreen(
-                    entry = entry,
-                    oauthClient = oauthClient,
-                    onBack = { selectedEntry = null },
-                    onSelectRelatedEntry = { related ->
-                        selectedEntry = PopularEntry(
-                            title = related.title,
-                            url = related.articleUrl,
-                            domain = Uri.parse(related.articleUrl).host ?: related.articleUrl,
-                            bookmarkCount = related.bookmarkCount,
-                            commentCount = 0,
-                            imageUrl = null,
-                        )
-                    },
-                )
-            }
-
-            // Overlay MyBookmarksScreen on top when needed
-            if (showMyBookmarks) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(MaterialTheme.colorScheme.background)
-                ) {
-                    MyBookmarksScreen(
-                        oauthClient = oauthClient,
-                        onBack = { showMyBookmarks = false },
-                        onSelectEntry = { selectedEntry = it }
-                    )
-                }
-            }
-                if (showNotifications) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.background),
-                    ) {
-                        NotificationsScreen(
-                            oauthClient = oauthClient,
-                            onBack = { showNotifications = false },
-                            onOpened = {
-                                hasUnreadNotifications = false
-                                notificationPreferences.edit()
-                                    .putLong("last_read_created", it)
-                                    .apply()
-                            },
-                        )
-                    }
-                }
-            }
-
-        }
-
     }
+}
 }
 
 @Composable
@@ -605,6 +712,7 @@ private fun NotificationsScreen(
     oauthClient: HatenaOAuthClient,
     onBack: () -> Unit,
     onOpened: (Long) -> Unit,
+    onNotificationClick: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf<NotificationsState>(NotificationsState.Loading) }
@@ -668,7 +776,10 @@ private fun NotificationsScreen(
                         contentPadding = PaddingValues(bottom = 24.dp),
                     ) {
                         items(currentState.items) { notification ->
-                            NotificationRow(notification)
+                            NotificationRow(
+                                notification = notification,
+                                onClick = { onNotificationClick(notification.subject) },
+                            )
                         }
                     }
                 }
@@ -678,7 +789,10 @@ private fun NotificationsScreen(
 }
 
 @Composable
-private fun NotificationRow(notification: HatenaNotification) {
+private fun NotificationRow(
+    notification: HatenaNotification,
+    onClick: () -> Unit,
+) {
     val userText = when {
         notification.users.isEmpty() -> "誰か"
         notification.users.size == 1 -> "${notification.users.first()}さん"
@@ -692,6 +806,7 @@ private fun NotificationRow(notification: HatenaNotification) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable(onClick = onClick)
             .padding(horizontal = 34.dp, vertical = 22.dp),
     ) {
         Row(verticalAlignment = Alignment.Top) {
@@ -723,13 +838,14 @@ private fun NotificationRow(notification: HatenaNotification) {
 @OptIn(ExperimentalMaterial3Api::class)
 private fun MyBookmarksScreen(
     oauthClient: HatenaOAuthClient,
+    stateHolder: MyBookmarksStateHolder,
     onBack: () -> Unit,
     onSelectEntry: (PopularEntry) -> Unit,
+    onSelectComment: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var state by remember { mutableStateOf<MyBookmarksState>(MyBookmarksState.Loading) }
     var selectedTab by rememberSaveable { mutableStateOf(0) }
-    var currentUserName by remember { mutableStateOf("") }
+    val state = stateHolder.state
     val pageSize = 50
     BackHandler(onBack = onBack)
 
@@ -753,12 +869,12 @@ private fun MyBookmarksScreen(
         }
 
     fun loadBookmarks() {
-        state = MyBookmarksState.Loading
+        stateHolder.state = MyBookmarksState.Loading
         scope.launch {
-            state = try {
+            stateHolder.state = try {
                 val json = withContext(Dispatchers.IO) { oauthClient.fetchMyBookmarks() }
                 val userName = withContext(Dispatchers.IO) { oauthClient.fetchMyUserName() }
-                currentUserName = userName
+                stateHolder.currentUserName = userName
                 val bookmarks = parseMyBookmarks(json)
                 val firstPage = enrichBookmarks(bookmarks.take(pageSize), userName)
                 MyBookmarksState.Loaded(
@@ -772,7 +888,11 @@ private fun MyBookmarksScreen(
         }
     }
 
-    LaunchedEffect(Unit) { loadBookmarks() }
+    LaunchedEffect(Unit) {
+        if (stateHolder.state is MyBookmarksState.Loading) {
+            loadBookmarks()
+        }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -888,7 +1008,12 @@ private fun MyBookmarksScreen(
                             )
                             if (bookmark.comment.isNotBlank()) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            bookmarkDetailUri(bookmark.commentUri)?.let(onSelectComment)
+                                        }
+                                        .padding(horizontal = 24.dp, vertical = 8.dp),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
                                     Text(
@@ -941,12 +1066,15 @@ private fun MyBookmarksScreen(
                                 val nextEntries = currentState.allEntries
                                     .drop(currentState.entries.size)
                                     .take(pageSize)
-                                state = currentState.copy(loadingMore = true)
+                                stateHolder.state = currentState.copy(loadingMore = true)
                                 scope.launch {
-                                    val enrichedNextEntries = enrichBookmarks(nextEntries, currentUserName)
-                                    val latest = state
+                                    val enrichedNextEntries = enrichBookmarks(
+                                        nextEntries,
+                                        stateHolder.currentUserName,
+                                    )
+                                    val latest = stateHolder.state
                                     if (latest is MyBookmarksState.Loaded) {
-                                        state = latest.copy(
+                                        stateHolder.state = latest.copy(
                                             entries = latest.entries + enrichedNextEntries,
                                             hasMore = latest.entries.size + enrichedNextEntries.size <
                                                 latest.allEntries.size,
@@ -1126,6 +1254,7 @@ private fun CategoryTabs(
 private fun EntryWebViewScreen(
     entry: PopularEntry,
     oauthClient: HatenaOAuthClient,
+    webViewStore: RetainedWebViewStore,
     onBack: () -> Unit,
     onSelectRelatedEntry: (RelatedEntry) -> Unit,
 ) {
@@ -1192,6 +1321,7 @@ private fun EntryWebViewScreen(
     selectedCommentUri?.let { commentUri ->
         CommentWebViewScreen(
             commentUri = commentUri,
+            webViewStore = webViewStore,
             onBack = { selectedCommentUri = null },
         )
         return
@@ -1327,7 +1457,7 @@ private fun EntryWebViewScreen(
                     .fillMaxSize()
                     .padding(innerPadding),
                 factory = { context ->
-                    WebView(context).apply {
+                    webViewStore.obtain(context, "entry:${entry.url}").apply {
                         webView = this
                         webViewClient = object : WebViewClient() {
                             override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
@@ -1385,11 +1515,7 @@ private fun EntryWebViewScreen(
                         view.loadUrl(currentEntry.url)
                     }
                 },
-                onRelease = { view ->
-                    view.stopLoading()
-                    view.destroy()
-                    webView = null
-                },
+                onRelease = { view -> webView = view },
             )
         }
 
@@ -1405,6 +1531,10 @@ private fun EntryWebViewScreen(
                     onBack = { showComments = false },
                     canPostStar = oauthClient.savedTokens() != null,
                     onCommentStarClick = {
+                        selectedCommentUri = it
+                        showComments = false
+                    },
+                    onCommentClick = {
                         selectedCommentUri = it
                         showComments = false
                     },
@@ -1465,6 +1595,7 @@ private fun EntryWebViewScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 private fun CommentWebViewScreen(
     commentUri: String,
+    webViewStore: RetainedWebViewStore,
     onBack: () -> Unit,
 ) {
     var webView by remember { mutableStateOf<WebView?>(null) }
@@ -1479,7 +1610,7 @@ private fun CommentWebViewScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("コメントのスター") },
+                title = { Text("コメント詳細") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Outlined.ArrowBack, contentDescription = "戻る")
@@ -1493,7 +1624,7 @@ private fun CommentWebViewScreen(
                 .fillMaxSize()
                 .padding(innerPadding),
             factory = { context ->
-                WebView(context).apply {
+            webViewStore.obtain(context, commentUri).apply {
                     webView = this
                     webViewClient = WebViewClient()
                     settings.javaScriptEnabled = true
@@ -1502,13 +1633,16 @@ private fun CommentWebViewScreen(
                 }
             },
             update = { view -> webView = view },
-            onRelease = { view ->
-                view.stopLoading()
-                view.destroy()
-                webView = null
-            },
+            onRelease = { view -> webView = view },
         )
     }
+}
+
+private fun bookmarkDetailUri(commentUri: String): String? {
+    val match = Regex(
+        "^https://b\\.hatena\\.ne\\.jp/([^/]+)/[^#]+#bookmark-(\\d+)$",
+    ).find(commentUri) ?: return null
+    return "https://b.hatena.ne.jp/entry/${match.groupValues[2]}/comment/${match.groupValues[1]}"
 }
 
 @Composable
@@ -1806,6 +1940,7 @@ private fun CommentsScreen(
     onRelatedEntryClick: (RelatedEntry) -> Unit,
     canPostStar: Boolean,
     onCommentStarClick: (String) -> Unit,
+    onCommentClick: (String) -> Unit,
 ) {
     var selectedTab by remember { mutableStateOf(0) }
     BackHandler(onBack = onBack)
@@ -1862,6 +1997,7 @@ private fun CommentsScreen(
             onRelatedEntryClick = onRelatedEntryClick,
             canPostStar = canPostStar,
             onCommentStarClick = onCommentStarClick,
+            onCommentClick = onCommentClick,
             ranked = selectedTab == 0,
         )
     }
@@ -1876,6 +2012,7 @@ private fun CommentsContent(
     onRelatedEntryClick: (RelatedEntry) -> Unit,
     canPostStar: Boolean,
     onCommentStarClick: (String) -> Unit,
+    onCommentClick: (String) -> Unit,
     ranked: Boolean,
 ) {
     when (state) {
@@ -1930,6 +2067,7 @@ private fun CommentsContent(
                             comment = comment,
                             canPostStar = canPostStar,
                             onStarClick = { onCommentStarClick(comment.commentUri) },
+                            onClick = { onCommentClick(comment.detailUri) },
                         )
                     }
                     if (state.loadingMore) {
@@ -2015,10 +2153,12 @@ private fun CommentItem(
     comment: BookmarkComment,
     canPostStar: Boolean,
     onStarClick: () -> Unit,
+    onClick: () -> Unit,
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
     ) {
         Text(

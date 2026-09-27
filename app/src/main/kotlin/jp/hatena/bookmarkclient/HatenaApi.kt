@@ -153,6 +153,7 @@ internal suspend fun fetchBookmarkComments(
                         timestamp = target.timestamp,
                         stars = fetchCommentStarCount(target.commentUri),
                         commentUri = target.commentUri,
+                        detailUri = "https://b.hatena.ne.jp/entry/$entryId/comment/${target.userName}",
                     )
                 }
             }.awaitAll()

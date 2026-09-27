@@ -18,6 +18,7 @@ internal data class BookmarkComment(
     val timestamp: String,
     val stars: Int,
     val commentUri: String,
+    val detailUri: String,
 )
 
 internal data class RelatedEntry(
