@@ -902,15 +902,6 @@ private fun EntryWebViewScreen(
         )
         return
     }
-    if (showBookmarkEditor) {
-        BookmarkEditorScreen(
-            entry = currentEntry,
-            oauthClient = oauthClient,
-            onBack = { showBookmarkEditor = false },
-        )
-        return
-    }
-
     BackHandler {
         if (webView?.canGoBack() == true) {
             webView?.goBack()
@@ -1159,6 +1150,20 @@ private fun EntryWebViewScreen(
                 )
             }
         }
+
+        if (showBookmarkEditor) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background),
+            ) {
+                BookmarkEditorScreen(
+                    entry = currentEntry,
+                    oauthClient = oauthClient,
+                    onBack = { showBookmarkEditor = false },
+                )
+            }
+        }
     }
 }
 
@@ -1220,7 +1225,9 @@ private fun BookmarkEditorScreen(
     onBack: () -> Unit,
 ) {
     var comment by remember { mutableStateOf("") }
+    var selectedTags by remember { mutableStateOf<List<String>>(emptyList()) }
     var state by remember { mutableStateOf<BookmarkPostState>(BookmarkPostState.Idle) }
+    var showTagSelection by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     BackHandler(onBack = onBack)
@@ -1260,65 +1267,237 @@ private fun BookmarkEditorScreen(
         )
     }
 
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            topBar = {
+                TopAppBar(
+                    title = { Text("ブックマーク", fontWeight = FontWeight.Bold) },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Outlined.ArrowBack, contentDescription = "閉じる")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        titleContentColor = MaterialTheme.colorScheme.onSurface,
+                        navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+                    ),
+                )
+            }
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                PopularEntryCard(entry = entry, onClick = {})
+                OutlinedTextField(
+                    value = comment,
+                    onValueChange = { if (it.length <= 100) comment = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                        .height(180.dp),
+                    placeholder = { Text("コメントを入力（任意）") },
+                    supportingText = { Text("${comment.length} / 100") },
+                )
+                Text(
+                    text = if (selectedTags.isEmpty()) "タグを入力" else selectedTags.joinToString("  "),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showTagSelection = true }
+                        .padding(horizontal = 16.dp, vertical = 18.dp),
+                )
+                Button(
+                    onClick = {
+                        state = BookmarkPostState.Saving
+                        scope.launch {
+                            state = try {
+                                withContext(Dispatchers.IO) {
+                                    oauthClient.addBookmark(entry.url, comment.trim(), selectedTags)
+                                }
+                                BookmarkPostState.Saved
+                            } catch (exception: Exception) {
+                                BookmarkPostState.Error(
+                                    exception.message ?: "ブックマークを登録できませんでした",
+                                )
+                            }
+                        }
+                    },
+                    enabled = state !is BookmarkPostState.Saving && comment.length <= 100,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                ) {
+                    Text(if (state is BookmarkPostState.Saving) "保存中…" else "保存")
+                }
+            }
+        }
+
+        if (showTagSelection) {
+            TagSelectionScreen(
+                oauthClient = oauthClient,
+                selectedTags = selectedTags,
+                onBack = { showTagSelection = false },
+                onTagsChanged = { selectedTags = it.take(10) },
+            )
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun TagSelectionScreen(
+    oauthClient: HatenaOAuthClient,
+    selectedTags: List<String>,
+    onBack: () -> Unit,
+    onTagsChanged: (List<String>) -> Unit,
+) {
+    var tags by remember { mutableStateOf<List<HatenaTag>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var customTag by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+
+    fun loadTags() {
+        scope.launch {
+            try {
+                tags = withContext(Dispatchers.IO) { oauthClient.fetchMyTags() }
+            } catch (exception: Exception) {
+                error = exception.message ?: "タグを取得できませんでした"
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) { loadTags() }
+    BackHandler(onBack = onBack)
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text("ブックマーク", fontWeight = FontWeight.Bold) },
+                title = { Text("タグを入力", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Outlined.ArrowBack, contentDescription = "閉じる")
+                        Icon(Icons.Outlined.ArrowBack, contentDescription = "戻る")
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
-                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
-                ),
             )
+        },
+        bottomBar = {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = customTag,
+                    onValueChange = { customTag = it },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    label = { Text("タグを入力") },
+                )
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = {
+                        val tag = customTag.trim()
+                        if (tag.isNotBlank() && tag !in selectedTags && selectedTags.size < 10) {
+                            onTagsChanged(selectedTags + tag)
+                            customTag = ""
+                        }
+                    },
+                    enabled = customTag.isNotBlank() && selectedTags.size < 10,
+                ) {
+                    Text("追加")
+                }
+            }
         },
     ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState()),
+                .padding(padding),
         ) {
-            PopularEntryCard(entry = entry, onClick = {})
-            OutlinedTextField(
-                value = comment,
-                onValueChange = { if (it.length <= 100) comment = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .height(180.dp),
-                placeholder = { Text("コメントを入力（任意）") },
-                supportingText = { Text("${comment.length} / 100") },
+            Text(
+                text = "選択中 (${selectedTags.size}/10)",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(16.dp),
             )
-            Button(
-                onClick = {
-                    state = BookmarkPostState.Saving
-                    scope.launch {
-                        state = try {
-                            withContext(Dispatchers.IO) {
-                                oauthClient.addBookmark(entry.url, comment.trim())
-                            }
-                            BookmarkPostState.Saved
-                        } catch (exception: Exception) {
-                            BookmarkPostState.Error(
-                                exception.message ?: "ブックマークを登録できませんでした",
-                            )
-                        }
-                    }
-                },
-                enabled = state !is BookmarkPostState.Saving && comment.length <= 100,
+            Row(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(if (state is BookmarkPostState.Saving) "保存中…" else "保存")
+                selectedTags.forEach { tag ->
+                    Button(onClick = { onTagsChanged(selectedTags - tag) }) {
+                        Text(tag)
+                    }
+                }
             }
+            error?.let {
+                ErrorContent(
+                    message = it,
+                    contentPadding = PaddingValues(16.dp),
+                    onRetry = {
+                        error = null
+                        loadTags()
+                    },
+                )
+            } ?: tags?.let { availableTags ->
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    item {
+                        Text(
+                            text = "おすすめタグ",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    items(availableTags.take(5), key = { "recommended-${it.name}" }) { tag ->
+                        TagChoiceRow(tag, selectedTags, onTagsChanged)
+                    }
+                    item {
+                        Text(
+                            text = "すべてのタグ",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                    }
+                    items(availableTags, key = { it.name }) { tag ->
+                        TagChoiceRow(tag, selectedTags, onTagsChanged)
+                    }
+                }
+            } ?: LoadingContent(PaddingValues(16.dp))
         }
+    }
+}
+
+@Composable
+private fun TagChoiceRow(
+    tag: HatenaTag,
+    selectedTags: List<String>,
+    onTagsChanged: (List<String>) -> Unit,
+) {
+    val selected = tag.name in selectedTags
+    Button(
+        onClick = {
+            onTagsChanged(
+                if (selected) selectedTags - tag.name
+                else if (selectedTags.size < 10) selectedTags + tag.name else selectedTags,
+            )
+        },
+        enabled = selected || selectedTags.size < 10,
+    ) {
+        Text("${tag.name} (${tag.count})")
     }
 }
 

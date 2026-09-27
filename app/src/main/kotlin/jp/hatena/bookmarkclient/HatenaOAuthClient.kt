@@ -11,6 +11,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import org.json.JSONObject
+import org.json.JSONArray
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -67,7 +68,7 @@ internal class HatenaOAuthClient(
         return fetchPublicFeed(feedUrl)
     }
 
-    fun addBookmark(url: String, comment: String) {
+    fun addBookmark(url: String, comment: String, tags: List<String> = emptyList()) {
         val tokens = savedTokens() ?: error("はてなにログインしてください")
         val parameters = linkedMapOf(
             "oauth_consumer_key" to consumerKey,
@@ -79,12 +80,43 @@ internal class HatenaOAuthClient(
             "url" to url,
             "comment" to comment,
         )
+        val repeatedParameters = parameters.entries.map { it.toPair() } +
+            tags.take(10).map { "tags" to it }
         request(
             method = "POST",
             endpoint = MyBookmarkEndpoint,
+            parameters = repeatedParameters,
+            tokenSecret = tokens.tokenSecret,
+        )
+    }
+
+    fun fetchMyTags(): List<HatenaTag> {
+        val tokens = savedTokens() ?: error("はてなにログインしてください")
+        val parameters = mapOf(
+            "oauth_consumer_key" to consumerKey,
+            "oauth_nonce" to randomNonce(),
+            "oauth_signature_method" to "HMAC-SHA1",
+            "oauth_timestamp" to (System.currentTimeMillis() / 1000L).toString(),
+            "oauth_token" to tokens.token,
+            "oauth_version" to "1.0",
+        )
+        val response = request(
+            method = "GET",
+            endpoint = MyTagsEndpoint,
             parameters = parameters,
             tokenSecret = tokens.tokenSecret,
         )
+        val root = JSONObject(response)
+        val tags = root.optJSONArray("tags") ?: JSONArray()
+        return buildList {
+            for (index in 0 until tags.length()) {
+                val item = tags.optJSONObject(index) ?: continue
+                val name = item.optString("tag").trim()
+                if (name.isNotBlank()) {
+                    add(HatenaTag(name = name, count = item.optInt("count")))
+                }
+            }
+        }.sortedByDescending { it.count }
     }
 
     fun fetchMyBookmarkComment(url: String): String? {
@@ -209,14 +241,26 @@ internal class HatenaOAuthClient(
         endpoint: String,
         parameters: Map<String, String>,
         tokenSecret: String,
+    ): String = request(
+        method = method,
+        endpoint = endpoint,
+        parameters = parameters.entries.map { it.toPair() },
+        tokenSecret = tokenSecret,
+    )
+
+    private fun request(
+        method: String,
+        endpoint: String,
+        parameters: List<Pair<String, String>>,
+        tokenSecret: String,
     ): String {
-        val encodedParameters = parameters.entries
-            .sortedWith(compareBy({ percentEncode(it.key) }, { percentEncode(it.value) }))
-            .joinToString("&") { "${percentEncode(it.key)}=${percentEncode(it.value)}" }
-        val encodedBody = parameters.entries
-            .filterNot { it.key.startsWith("oauth_") }
-            .sortedWith(compareBy({ percentEncode(it.key) }, { percentEncode(it.value) }))
-            .joinToString("&") { "${percentEncode(it.key)}=${percentEncode(it.value)}" }
+        val encodedParameters = parameters
+            .sortedWith(compareBy({ percentEncode(it.first) }, { percentEncode(it.second) }))
+            .joinToString("&") { "${percentEncode(it.first)}=${percentEncode(it.second)}" }
+        val encodedBody = parameters
+            .filterNot { it.first.startsWith("oauth_") }
+            .sortedWith(compareBy({ percentEncode(it.first) }, { percentEncode(it.second) }))
+            .joinToString("&") { "${percentEncode(it.first)}=${percentEncode(it.second)}" }
         val baseString = listOf(
             method,
             percentEncode(endpoint),
@@ -229,9 +273,9 @@ internal class HatenaOAuthClient(
             mac.doFinal(baseString.toByteArray(StandardCharsets.UTF_8)),
             Base64.NO_WRAP,
         )
-        val authorization = parameters.entries
-            .filter { it.key.startsWith("oauth_") }
-            .map { "${percentEncode(it.key)}=\"${percentEncode(it.value)}\"" }
+        val authorization = parameters
+            .filter { it.first.startsWith("oauth_") }
+            .map { "${percentEncode(it.first)}=\"${percentEncode(it.second)}\"" }
             .toMutableList()
             .apply { add("oauth_signature=\"${percentEncode(signature)}\"") }
             .joinToString(", ")
@@ -293,5 +337,6 @@ internal class HatenaOAuthClient(
         const val AccessTokenEndpoint = "https://www.hatena.com/oauth/token"
         const val HatenaProfileEndpoint = "https://n.hatena.com/applications/my.json"
         const val MyBookmarkEndpoint = "https://bookmark.hatenaapis.com/rest/1/my/bookmark"
+        const val MyTagsEndpoint = "https://bookmark.hatenaapis.com/rest/1/my/tags"
     }
 }

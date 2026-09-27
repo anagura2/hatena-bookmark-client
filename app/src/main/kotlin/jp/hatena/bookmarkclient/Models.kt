@@ -47,6 +47,11 @@ internal data class MyBookmarkEntry(
     val starCount: Int = 0,
 )
 
+internal data class HatenaTag(
+    val name: String,
+    val count: Int,
+)
+
 internal sealed interface BookmarkPostState {
     data object Idle : BookmarkPostState
     data object Saving : BookmarkPostState
