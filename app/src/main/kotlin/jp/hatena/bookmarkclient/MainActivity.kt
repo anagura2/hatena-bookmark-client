@@ -308,6 +308,7 @@ private fun PopularEntriesScreen(
             drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(
+                modifier = Modifier.width(200.dp),
                 drawerContainerColor = MaterialTheme.colorScheme.surface,
                 drawerContentColor = MaterialTheme.colorScheme.onSurface,
             ) {
@@ -320,7 +321,7 @@ private fun PopularEntriesScreen(
                     Text(
                         text = "はてなブックマーク",
                         modifier = Modifier.padding(horizontal = 28.dp, vertical = 16.dp),
-                        style = MaterialTheme.typography.titleLarge,
+                        fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
                     )
                     HorizontalDivider(color = Color(0xFF294047))
@@ -329,9 +330,9 @@ private fun PopularEntriesScreen(
                         selected = true,
                         onClick = { scope.launch { drawerState.close() } },
                     )
-                    DrawerItem("For You", false) {}
-                    DrawerItem("お気に入り", false) {}
-                    DrawerItem("関心ワード", false) {}
+                    DrawerItem("For You", false, enabled = false) {}
+                    DrawerItem("お気に入り", false, enabled = false) {}
+                    DrawerItem("関心ワード", false, enabled = false) {}
                     HorizontalDivider(
                         modifier = Modifier.padding(vertical = 8.dp),
                         color = Color(0xFF294047),
@@ -363,7 +364,7 @@ private fun PopularEntriesScreen(
                             }
                         }
                     )
-                    DrawerItem("設定", false) {}
+                    DrawerItem("設定", false, enabled = false) {}
                 }
             }
         },
@@ -726,22 +727,30 @@ private fun MyBookmarksScreen(
 private fun DrawerItem(
         label: String,
         selected: Boolean,
+        enabled: Boolean = true,
         onClick: () -> Unit,
 ) {
         NavigationDrawerItem(
             label = {
                 Text(
                     text = label,
+                    fontSize = 12.sp,
                     fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                 )
             },
             selected = selected,
-            onClick = onClick,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+            onClick = if (enabled) onClick else ({}),
+            modifier = Modifier
+                .padding(horizontal = 12.dp, vertical = 1.dp)
+                .height(36.dp),
             colors = androidx.compose.material3.NavigationDrawerItemDefaults.colors(
                 selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
                 selectedTextColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                unselectedTextColor = MaterialTheme.colorScheme.onSurface,
+                unselectedTextColor = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                },
                 unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
             ),
@@ -803,7 +812,7 @@ private fun CategoryTabs(
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 14.dp),
+                            .padding(vertical = 8.dp),
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         maxLines = 1,
                         softWrap = false,
