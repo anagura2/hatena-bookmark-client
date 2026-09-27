@@ -33,6 +33,57 @@ internal fun fetchPopularEntries(feedUrl: String): List<PopularEntry> {
     }
 }
 
+internal fun fetchSearchEntries(query: String): List<PopularEntry> {
+    require(query.isNotBlank()) { "検索キーワードを入力してください" }
+    val endpoint = "https://b.hatena.ne.jp/q/${Uri.encode(query)}" +
+        "?target=text&mode=rss&sort=popular"
+    return fetchRssEntries(endpoint)
+}
+
+internal fun fetchTrendingKeywords(): List<String> {
+    val connection = (URL("https://b.hatena.ne.jp/").openConnection() as HttpURLConnection).apply {
+        connectTimeout = 10_000
+        readTimeout = 10_000
+        requestMethod = "GET"
+        setRequestProperty("Accept", "text/html")
+        setRequestProperty("User-Agent", "HatenaBookmarkClient/0.1.0")
+    }
+    return try {
+        if (connection.responseCode !in 200..299) return emptyList()
+        val html = connection.inputStream.bufferedReader().use { it.readText() }
+        Regex("""href="/q/([^"]+)"""")
+            .findAll(html)
+            .mapNotNull { match ->
+                Uri.decode(match.groupValues[1])
+                    .replace("&amp;", "&")
+                    .takeIf { it.isNotBlank() }
+            }
+            .distinct()
+            .take(10)
+            .toList()
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun fetchRssEntries(feedUrl: String): List<PopularEntry> {
+    val connection = (URL(feedUrl).openConnection() as HttpURLConnection).apply {
+        connectTimeout = 10_000
+        readTimeout = 10_000
+        requestMethod = "GET"
+        setRequestProperty("Accept", "application/rss+xml, application/xml")
+        setRequestProperty("User-Agent", "HatenaBookmarkClient/0.1.0")
+    }
+    return try {
+        if (connection.responseCode !in 200..299) {
+            throw IllegalStateException("検索APIエラー: HTTP ${connection.responseCode}")
+        }
+        parsePopularEntries(connection.inputStream.bufferedReader().use { it.readText() })
+    } finally {
+        connection.disconnect()
+    }
+}
+
 internal fun parseMyBookmarks(json: String): List<MyBookmarkEntry> {
     val trimmed = json.trim()
     if (trimmed.startsWith("<?xml") || trimmed.startsWith("<rss") || trimmed.startsWith("<feed")) {

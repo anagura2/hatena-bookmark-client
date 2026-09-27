@@ -12,6 +12,8 @@ This repository is a native Android Hatena Bookmark client for personal use. It 
   - OAuth 1.0a flow, token persistence, authenticated profile/bookmark requests, and bookmark posting.
 - `app/src/main/AndroidManifest.xml`
   - Application metadata and launcher icon.
+- `app/src/main/res/drawable/app_icon.png`
+  - Current 512x512 launcher icon artwork.
 - `app/build.gradle.kts`
   - Android/Compose configuration and local OAuth credential injection.
 - `README.md`
@@ -95,6 +97,9 @@ After changing scopes, clear the existing login from the app and authenticate ag
 - Article detail starts comment/star-count prefetching while the detail screen is open.
 - My Bookmarks displays 50 items at a time and loads/enriches later pages when scrolling.
 - Bookmark creation uses the authenticated Hatena Bookmark REST endpoint and restores the existing comment when editing an already-bookmarked URL.
+- Home list search opens from the top-right search button; the adjacent refresh button keeps the previous reload behavior.
+- Search results use `https://b.hatena.ne.jp/q/{query}?target=text&mode=rss&sort=popular`, and the initial search screen loads trending keyword links from the Hatena Bookmark top page.
+- Home category selection, category carousel position, article lists, and list scroll positions are retained by `PopularEntriesStateHolder` while navigating to detail screens and back.
 - Theme follows the Android system light/dark setting.
 
 ## API notes
@@ -107,6 +112,8 @@ Common public feeds:
 - `https://b.hatena.ne.jp/hotentry/it.rss`
 - `https://b.hatena.ne.jp/hotentry/social.rss`
 - `https://b.hatena.ne.jp/hotentry/game.rss`
+- Public text search RSS:
+  `https://b.hatena.ne.jp/q/{query}?target=text&mode=rss&sort=popular`
 
 Comment star count flow:
 

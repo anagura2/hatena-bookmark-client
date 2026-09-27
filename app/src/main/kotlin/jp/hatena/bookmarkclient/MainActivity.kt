@@ -35,12 +35,25 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusTarget
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -230,6 +243,14 @@ private class MyBookmarksStateHolder {
     var currentUserName by mutableStateOf("")
 }
 
+private class PopularEntriesStateHolder {
+    val categoryStates = mutableStateMapOf<String, EntriesState>()
+    val listStates = mutableMapOf<String, LazyListState>()
+    var selectedCategoryFeedUrl by mutableStateOf(entryCategories.first().feedUrl)
+    var categoryTabIndex by mutableStateOf(entryCategories.size)
+    var categoryTabScrollOffset by mutableStateOf(0)
+}
+
 @Composable
 private fun HatenaBookmarkNavHost(
     oauthClient: HatenaOAuthClient,
@@ -247,6 +268,7 @@ private fun HatenaBookmarkNavHost(
     val navController = rememberNavController()
     val webViewStore = remember { RetainedWebViewStore() }
     val myBookmarksStateHolder = remember { MyBookmarksStateHolder() }
+    val popularEntriesStateHolder = remember { PopularEntriesStateHolder() }
     DisposableEffect(Unit) {
         onDispose { webViewStore.destroyAll() }
     }
@@ -254,7 +276,6 @@ private fun HatenaBookmarkNavHost(
         "notification_state",
         0,
     )
-
     fun openEntry(entry: PopularEntry) {
         navController.navigate(
             "$ENTRY_ROUTE?url=${Uri.encode(entry.url)}" +
@@ -269,6 +290,7 @@ private fun HatenaBookmarkNavHost(
         composable(HOME_ROUTE) {
             PopularEntriesScreen(
                 oauthClient = oauthClient,
+                stateHolder = popularEntriesStateHolder,
                 oauthError = oauthError,
                 oauthLoading = oauthLoading,
                 oauthWaitingForVerifier = oauthWaitingForVerifier,
@@ -365,6 +387,7 @@ private fun HatenaBookmarkNavHost(
 @OptIn(ExperimentalMaterial3Api::class)
 private fun PopularEntriesScreen(
     oauthClient: HatenaOAuthClient,
+    stateHolder: PopularEntriesStateHolder,
     oauthError: String?,
     oauthLoading: Boolean,
     oauthWaitingForVerifier: Boolean,
@@ -380,15 +403,71 @@ private fun PopularEntriesScreen(
     onOpenEntry: (PopularEntry) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val categoryStates = remember { mutableStateMapOf<String, EntriesState>() }
-    val listStates = remember { mutableMapOf<String, LazyListState>() }
-    var selectedCategory by remember { mutableStateOf(entryCategories.first()) }
+    val categoryStates = stateHolder.categoryStates
+    val listStates = stateHolder.listStates
+    val selectedCategoryFeedUrl = stateHolder.selectedCategoryFeedUrl
+    val selectedCategory = entryCategories.firstOrNull {
+        it.feedUrl == selectedCategoryFeedUrl
+    } ?: entryCategories.first()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     var hasUnreadNotifications by remember { mutableStateOf(false) }
     val notificationPreferences = LocalContext.current.getSharedPreferences(
         "notification_state",
         0,
     )
+    val focusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var searchState by remember { mutableStateOf<SearchState>(SearchState.Idle) }
+    var trendingKeywords by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    fun openSearch() {
+        searchOpen = true
+        searchState = SearchState.Idle
+        scope.launch {
+            trendingKeywords = withContext(Dispatchers.IO) {
+                fetchTrendingKeywords()
+            }
+            if (trendingKeywords.isEmpty()) {
+                trendingKeywords = categoryStates.values
+                    .filterIsInstance<EntriesState.Loaded>()
+                    .flatMap { state -> state.entries.flatMap { it.tags } }
+                    .distinct()
+                    .take(10)
+            }
+        }
+    }
+
+    fun submitSearch() {
+        val query = searchQuery.trim()
+        if (query.isBlank()) return
+        focusManager.clearFocus()
+        searchState = SearchState.Loading
+        scope.launch {
+            searchState = try {
+                SearchState.Loaded(withContext(Dispatchers.IO) {
+                    fetchSearchEntries(query)
+                })
+            } catch (exception: Exception) {
+                SearchState.Error(exception.message ?: "検索結果を取得できませんでした")
+            }
+        }
+    }
+
+    BackHandler(enabled = searchOpen) {
+        if (searchState is SearchState.Loaded || searchState is SearchState.Error) {
+            searchState = SearchState.Idle
+        } else {
+            searchOpen = false
+            searchQuery = ""
+        }
+    }
+    LaunchedEffect(searchOpen, searchState) {
+        if (searchOpen && searchState is SearchState.Idle) {
+            focusRequester.requestFocus()
+        }
+    }
 
     fun loadEntries(category: EntryCategory = selectedCategory, forceReload: Boolean = false) {
         if (!forceReload && categoryStates[category.feedUrl] is EntriesState.Loaded) {
@@ -408,7 +487,7 @@ private fun PopularEntriesScreen(
 
     fun selectCategory(category: EntryCategory) {
         if (category == selectedCategory) return
-        selectedCategory = category
+        stateHolder.selectedCategoryFeedUrl = category.feedUrl
         if (categoryStates[category.feedUrl] !is EntriesState.Loaded) {
             loadEntries(category)
         }
@@ -572,25 +651,101 @@ private fun PopularEntriesScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             Column {
-                TopAppBar(
-                    title = { Text(text = "ホーム", fontWeight = FontWeight.Bold) },
-                    navigationIcon = {
-                        IconButton(
-                            onClick = {
-                                scope.launch { drawerState.open() }
+                        TopAppBar(
+                            title = {
+                                if (!searchOpen) {
+                                    Text(text = "ホーム", fontWeight = FontWeight.Bold)
+                                } else if (searchState is SearchState.Loaded) {
+                                    Text(
+                                        text = "「${searchQuery.trim()}」の検索結果",
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                } else {
+                                    BasicTextField(
+                                        value = searchQuery,
+                                        onValueChange = { searchQuery = it },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .onPreviewKeyEvent { event ->
+                                                if (event.key == Key.Enter &&
+                                                    event.type == KeyEventType.KeyUp
+                                                ) {
+                                                    submitSearch()
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            }
+                                            .focusRequester(focusRequester),
+                                        singleLine = true,
+                                        textStyle = MaterialTheme.typography.titleLarge.copy(
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                        ),
+                                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                        keyboardActions = KeyboardActions(
+                                            onSearch = { submitSearch() },
+                                            onDone = { submitSearch() },
+                                            onGo = { submitSearch() },
+                                        ),
+                                        decorationBox = { innerTextField ->
+                                            if (searchQuery.isBlank()) {
+                                                Text(
+                                                    "ブックマークを検索",
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    style = MaterialTheme.typography.titleLarge,
+                                                )
+                                            }
+                                            innerTextField()
+                                        },
+                                    )
+                                }
                             },
-                        ) {
-                            Icon(
-                                Icons.Outlined.Menu,
-                                contentDescription = "メニュー",
-                            )
-                        }
-                    },
-                    actions = {
-                        IconButton(onClick = { loadEntries(selectedCategory, forceReload = true) }) {
-                            Icon(Icons.Outlined.Search, contentDescription = "検索")
-                        }
-                    },
+                            navigationIcon = {
+                                IconButton(
+                                    onClick = {
+                                        if (searchOpen) {
+                                            if (searchState is SearchState.Loaded ||
+                                                searchState is SearchState.Error
+                                            ) {
+                                                searchState = SearchState.Idle
+                                            } else {
+                                                searchOpen = false
+                                                searchQuery = ""
+                                            }
+                                        } else {
+                                            scope.launch { drawerState.open() }
+                                        }
+                                    },
+                                ) {
+                                    Icon(
+                                        if (searchOpen) Icons.Outlined.ArrowBack else Icons.Outlined.Menu,
+                                        contentDescription = if (searchOpen) "戻る" else "メニュー",
+                                    )
+                                }
+                            },
+                            actions = {
+                                if (!searchOpen) {
+                                    IconButton(onClick = {
+                                        loadEntries(selectedCategory, forceReload = true)
+                                    }) {
+                                        Icon(Icons.Outlined.Refresh, contentDescription = "再読み込み")
+                                    }
+                                    IconButton(onClick = {
+                                        openSearch()
+                                    }) {
+                                        Icon(Icons.Outlined.Search, contentDescription = "検索")
+                                    }
+                                } else if (searchState !is SearchState.Loaded) {
+                                    IconButton(onClick = {
+                                        searchQuery = ""
+                                        searchState = SearchState.Idle
+                                    }) {
+                                        Text("×", fontSize = 28.sp)
+                                    }
+                                }
+                            },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.surfaceVariant,
                         titleContentColor = MaterialTheme.colorScheme.onSurface,
@@ -601,6 +756,8 @@ private fun PopularEntriesScreen(
                 CategoryTabs(
                     selectedCategory = selectedCategory,
                     onCategorySelected = ::selectCategory,
+                    stateHolder = stateHolder,
+                    visible = !searchOpen,
                 )
             }
         },
@@ -633,7 +790,82 @@ private fun PopularEntriesScreen(
                     )
                 },
         ) {
-            AnimatedContent(
+            if (searchOpen) {
+                when (val currentState = searchState) {
+                    SearchState.Idle -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(innerPadding)
+                                .verticalScroll(rememberScrollState()),
+                        ) {
+                            Text(
+                                "話題のワード",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .padding(horizontal = 24.dp, vertical = 14.dp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 18.sp,
+                            )
+                            trendingKeywords.forEach { keyword ->
+                                Text(
+                                    keyword,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            searchQuery = keyword
+                                            submitSearch()
+                                        }
+                                        .padding(horizontal = 24.dp, vertical = 14.dp),
+                                    fontSize = 22.sp,
+                                )
+                            }
+                        }
+                    }
+                    SearchState.Loading -> LoadingContent(innerPadding)
+                    is SearchState.Error -> ErrorContent(
+                        message = currentState.message,
+                        contentPadding = innerPadding,
+                        onRetry = ::submitSearch,
+                    )
+                    is SearchState.Loaded -> {
+                        if (currentState.entries.isEmpty()) {
+                            ErrorContent(
+                                message = "検索結果がありません",
+                                contentPadding = innerPadding,
+                                onRetry = ::submitSearch,
+                            )
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(innerPadding),
+                                contentPadding = PaddingValues(top = 12.dp, bottom = 96.dp),
+                            ) {
+                                item {
+                                    Text(
+                                        "${currentState.entries.size}件",
+                                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 18.sp,
+                                    )
+                                }
+                                items(currentState.entries, key = { it.url }) { entry ->
+                                    PopularEntryCard(
+                                        entry = entry,
+                                        isRead = entry.url in readUrls,
+                                        onClick = {
+                                            onEntryOpened(entry.url)
+                                            onOpenEntry(entry)
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            } else AnimatedContent(
                 targetState = selectedCategory,
                 transitionSpec = {
                     fadeIn(animationSpec = tween(220)).togetherWith(
@@ -686,17 +918,19 @@ private fun PopularEntriesScreen(
                     }
                 }
             }
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.BottomEnd,
-            ) {
-                FloatingActionButton(
-                    onClick = onOpenMyBookmarks,
-                    modifier = Modifier.padding(end = 20.dp, bottom = 20.dp),
-                    containerColor = Color(0xFF00B8C8),
-                    contentColor = Color.White,
+            if (!searchOpen) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.BottomEnd,
                 ) {
-                    Icon(Icons.Outlined.BookmarkBorder, contentDescription = "ブックマーク")
+                    FloatingActionButton(
+                        onClick = onOpenMyBookmarks,
+                        modifier = Modifier.padding(end = 20.dp, bottom = 20.dp),
+                        containerColor = Color(0xFF00B8C8),
+                        contentColor = Color.White,
+                    ) {
+                        Icon(Icons.Outlined.BookmarkBorder, contentDescription = "ブックマーク")
+                    }
                 }
             }
         }
@@ -1144,24 +1378,30 @@ private fun DrawerItem(
 private fun CategoryTabs(
     selectedCategory: EntryCategory,
     onCategorySelected: (EntryCategory) -> Unit,
+    stateHolder: PopularEntriesStateHolder,
+    visible: Boolean = true,
 ) {
-    val scrollState = rememberScrollState()
+    val scrollState = rememberScrollState(stateHolder.categoryTabScrollOffset)
     val repeatedCategories = List(3) { entryCategories }.flatten()
     val middleBlockStart = entryCategories.size
-    var selectedTabIndex by remember {
-        mutableStateOf(middleBlockStart + entryCategories.indexOf(selectedCategory))
-    }
+    var selectedTabIndex by remember { mutableStateOf(stateHolder.categoryTabIndex) }
     fun tabWidth(category: EntryCategory): Dp =
         if (category.label == "アニメとゲーム") 176.dp else 112.dp
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
+            .height(if (visible) 48.dp else 0.dp)
             .background(
                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
             ),
     ) {
         val scope = rememberCoroutineScope()
         val density = androidx.compose.ui.platform.LocalDensity.current
+        LaunchedEffect(scrollState) {
+            snapshotFlow { scrollState.value }.collectLatest { offset ->
+                stateHolder.categoryTabScrollOffset = offset
+            }
+        }
         LaunchedEffect(selectedCategory, maxWidth) {
             val selectedIndex = if (
                 selectedTabIndex in repeatedCategories.indices &&
@@ -1186,6 +1426,7 @@ private fun CategoryTabs(
                 }
             }
             selectedTabIndex = selectedIndex
+            stateHolder.categoryTabIndex = selectedIndex
             val target = with(density) {
                 val precedingWidth = repeatedCategories.take(selectedIndex)
                     .sumOf { tabWidth(it).toPx().toDouble() }
@@ -1194,11 +1435,14 @@ private fun CategoryTabs(
                 (precedingWidth + selectedWidth / 2f - maxWidth.toPx() / 2f + 8.dp.toPx())
                     .toInt()
             }
-            scope.launch {
-                scrollState.animateScrollTo(
-                    target.coerceIn(0, scrollState.maxValue),
-                    tween(650, easing = FastOutSlowInEasing),
-                )
+            val clampedTarget = target.coerceIn(0, scrollState.maxValue)
+            if (kotlin.math.abs(scrollState.value - clampedTarget) > 2) {
+                scope.launch {
+                    scrollState.animateScrollTo(
+                        clampedTarget,
+                        tween(650, easing = FastOutSlowInEasing),
+                    )
+                }
             }
         }
         Row(
@@ -1212,6 +1456,7 @@ private fun CategoryTabs(
                         .width(tabWidth(category))
                         .clickable {
                             selectedTabIndex = index
+                            stateHolder.categoryTabIndex = index
                             onCategorySelected(category)
                         }
                 ) {
@@ -1390,6 +1635,18 @@ private fun EntryWebViewScreen(
                     )
                 }
                 IconButton(
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(currentEntry.url))
+                        Toast.makeText(context, "URLをコピーしました", Toast.LENGTH_SHORT).show()
+                    },
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.ContentCopy,
+                        contentDescription = "URLをコピー",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                IconButton(
                     onClick = { showBookmarkEditor = true },
                 ) {
                     Text(
@@ -1418,18 +1675,6 @@ private fun EntryWebViewScreen(
                         color = Color(0xFFFF4D83),
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Bold,
-                    )
-                }
-                IconButton(
-                    onClick = {
-                        clipboardManager.setText(AnnotatedString(currentEntry.url))
-                        Toast.makeText(context, "URLをコピーしました", Toast.LENGTH_SHORT).show()
-                    },
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.ContentCopy,
-                        contentDescription = "URLをコピー",
-                        tint = MaterialTheme.colorScheme.onSurface,
                     )
                 }
                 IconButton(
@@ -2164,21 +2409,26 @@ private fun CommentItem(
         Text(
             text = comment.userName,
             color = Color(0xFF00A8D0),
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleSmall,
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = comment.text.ifBlank { "（コメントなし）" },
             color = MaterialTheme.colorScheme.onSurface,
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(modifier = Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(text = comment.timestamp, color = Color(0xFF91A0A3))
+            Text(
+                text = comment.timestamp,
+                color = Color(0xFF91A0A3),
+                style = MaterialTheme.typography.bodySmall,
+            )
             if (canPostStar) {
                 Text(
                     text = "☆",
                     color = Color(0xFF91A0A3),
+                    style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.clickable(onClick = onStarClick),
                 )
             }
@@ -2187,6 +2437,7 @@ private fun CommentItem(
                     text = "★ ${comment.stars}",
                     color = Color(0xFFFFD21C),
                     fontWeight = FontWeight.Medium,
+                    style = MaterialTheme.typography.bodySmall,
                 )
             }
         }

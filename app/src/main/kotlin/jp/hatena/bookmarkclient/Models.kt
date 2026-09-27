@@ -106,6 +106,13 @@ internal sealed interface EntriesState {
     data class Error(val message: String) : EntriesState
 }
 
+internal sealed interface SearchState {
+    data object Idle : SearchState
+    data object Loading : SearchState
+    data class Loaded(val entries: List<PopularEntry>) : SearchState
+    data class Error(val message: String) : SearchState
+}
+
 internal data class EntryCategory(
     val label: String,
     val feedUrl: String,
