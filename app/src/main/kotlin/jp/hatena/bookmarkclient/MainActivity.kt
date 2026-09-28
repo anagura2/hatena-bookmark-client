@@ -249,6 +249,7 @@ private class PopularEntriesStateHolder {
     var selectedCategoryFeedUrl by mutableStateOf(entryCategories.first().feedUrl)
     var categoryTabIndex by mutableStateOf(entryCategories.size)
     var categoryTabScrollOffset by mutableStateOf(0)
+    var categoryTabsInitialized by mutableStateOf(false)
 }
 
 @Composable
@@ -1385,6 +1386,7 @@ private fun CategoryTabs(
     val repeatedCategories = List(3) { entryCategories }.flatten()
     val middleBlockStart = entryCategories.size
     var selectedTabIndex by remember { mutableStateOf(stateHolder.categoryTabIndex) }
+    var hasEnteredComposition by remember { mutableStateOf(false) }
     fun tabWidth(category: EntryCategory): Dp =
         if (category.label == "アニメとゲーム") 176.dp else 112.dp
     BoxWithConstraints(
@@ -1399,10 +1401,37 @@ private fun CategoryTabs(
         val density = androidx.compose.ui.platform.LocalDensity.current
         LaunchedEffect(scrollState) {
             snapshotFlow { scrollState.value }.collectLatest { offset ->
-                stateHolder.categoryTabScrollOffset = offset
+                if (scrollState.maxValue > 0) {
+                    stateHolder.categoryTabScrollOffset = offset
+                }
             }
         }
         LaunchedEffect(selectedCategory, maxWidth) {
+            if (maxWidth == 0.dp) return@LaunchedEffect
+
+            if (!hasEnteredComposition) {
+                hasEnteredComposition = true
+                if (!stateHolder.categoryTabsInitialized) {
+                    val initialIndex = middleBlockStart + entryCategories.indexOf(selectedCategory)
+                    selectedTabIndex = initialIndex
+                    stateHolder.categoryTabIndex = initialIndex
+                    val initialTarget = with(density) {
+                        val precedingWidth = repeatedCategories.take(initialIndex)
+                            .sumOf { tabWidth(it).toPx().toDouble() }
+                            .toFloat()
+                        (
+                            precedingWidth +
+                                tabWidth(selectedCategory).toPx() / 2f -
+                                maxWidth.toPx() / 2f +
+                                8.dp.toPx()
+                            ).toInt()
+                    }
+                    scrollState.scrollTo(initialTarget.coerceIn(0, scrollState.maxValue))
+                    stateHolder.categoryTabsInitialized = true
+                }
+                return@LaunchedEffect
+            }
+
             val selectedIndex = if (
                 selectedTabIndex in repeatedCategories.indices &&
                 repeatedCategories[selectedTabIndex] == selectedCategory
@@ -1723,11 +1752,25 @@ private fun EntryWebViewScreen(
                                         bookmarkCount = 0,
                                     )
                                     scope.launch {
-                                        val bookmarkCount = withContext(Dispatchers.IO) {
-                                            fetchEntryBookmarkCount(navigatedUrl)
-                                        }
-                                        if (webView?.url == navigatedUrl && latestEntry.url == navigatedUrl) {
-                                            currentEntry = latestEntry.copy(bookmarkCount = bookmarkCount)
+                                        try {
+                                            val bookmarkCount = withContext(Dispatchers.IO) {
+                                                fetchEntryBookmarkCount(navigatedUrl)
+                                            }
+                                            if (webView?.url == navigatedUrl &&
+                                                latestEntry.url == navigatedUrl
+                                            ) {
+                                                currentEntry = latestEntry.copy(
+                                                    bookmarkCount = bookmarkCount,
+                                                )
+                                            }
+                                        } catch (exception: CancellationException) {
+                                            throw exception
+                                        } catch (exception: Exception) {
+                                            Log.w(
+                                                "EntryWebView",
+                                                "Unable to fetch bookmark count for $navigatedUrl",
+                                                exception,
+                                            )
                                         }
                                     }
                                 } else if (navigatedTitle != null && navigatedTitle != latestEntry.title) {
@@ -1754,7 +1797,7 @@ private fun EntryWebViewScreen(
                 },
                 update = { view ->
                     webView = view
-                    if (loadedEntryUrl != currentEntry.url) {
+                    if (loadedEntryUrl == null && view.url.isNullOrBlank()) {
                         loadedEntryUrl = currentEntry.url
                         canGoBack = false
                         view.loadUrl(currentEntry.url)
@@ -2487,6 +2530,11 @@ private fun PopularEntryCard(
     isRead: Boolean = false,
     onClick: () -> Unit,
 ) {
+    val readTitleColor = if (isSystemInDarkTheme()) {
+        Color(0xFF86A5AA)
+    } else {
+        Color(0xFF607D83)
+    }
     Card(
         modifier = Modifier.fillMaxWidth(),
         onClick = onClick,
@@ -2499,12 +2547,12 @@ private fun PopularEntryCard(
                 Text(
                     text = entry.title,
                     color = if (isRead) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
+                        readTitleColor
                     } else {
                         MaterialTheme.colorScheme.onSurface
                     },
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = if (isRead) FontWeight.Medium else FontWeight.Bold,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )

@@ -171,7 +171,10 @@ internal suspend fun fetchBookmarkComments(
         if (connection.responseCode !in 200..299) {
             throw IllegalStateException("コメントAPIエラー: HTTP ${connection.responseCode}")
         }
-        val json = connection.inputStream.bufferedReader().use { it.readText() }
+        val json = connection.inputStream.bufferedReader().use { it.readText() }.trim()
+        if (json.isBlank() || json == "null" || !json.startsWith("{")) {
+            return BookmarkCommentPage(emptyList(), false)
+        }
         val root = JSONObject(json)
         val entryId = root.optString("eid")
         val bookmarks = root.optJSONArray("bookmarks") ?: return BookmarkCommentPage(emptyList(), false)
@@ -254,9 +257,11 @@ internal fun fetchCommentStarCount(commentUri: String): Int {
         if (connection.responseCode !in 200..299) {
             throw IllegalStateException("スターAPIエラー: HTTP ${connection.responseCode}")
         }
-        val entries = JSONObject(
-            connection.inputStream.bufferedReader().use { it.readText() },
-        ).optJSONArray("entries") ?: return 0
+        val json = connection.inputStream.bufferedReader().use { it.readText() }.trim()
+        if (json.isBlank() || json == "null" || !json.startsWith("{")) {
+            return 0
+        }
+        val entries = JSONObject(json).optJSONArray("entries") ?: return 0
         entries.optJSONObject(0)?.optJSONArray("stars")?.length() ?: 0
     } finally {
         connection.disconnect()
@@ -280,7 +285,11 @@ internal fun fetchMyBookmarkStarCount(bookmark: MyBookmarkEntry, userName: Strin
     }
     return try {
         if (connection.responseCode !in 200..299) return 0
-        val root = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+        val json = connection.inputStream.bufferedReader().use { it.readText() }.trim()
+        if (json.isBlank() || json == "null" || !json.startsWith("{")) {
+            return 0
+        }
+        val root = JSONObject(json)
         val entryId = root.optString("eid")
         val bookmarks = root.optJSONArray("bookmarks") ?: return 0
         val targetComment = normalizeBookmarkComment(bookmark.comment)
@@ -320,8 +329,11 @@ internal fun fetchEntryBookmarkCount(entryUrl: String): Int {
     }
     return try {
         if (connection.responseCode !in 200..299) return 0
-        val json = connection.inputStream.bufferedReader().use { it.readText() }
-        JSONObject(json).optInt("count")
+        val json = connection.inputStream.bufferedReader().use { it.readText() }.trim()
+        if (json.isBlank() || json == "null" || !json.startsWith("{")) {
+            return 0
+        }
+        JSONObject(json).optInt("count").coerceAtLeast(0)
     } finally {
         connection.disconnect()
     }
