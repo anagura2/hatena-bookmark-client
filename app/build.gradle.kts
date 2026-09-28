@@ -27,16 +27,18 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.2.1"
         buildConfigField(
             "String",
             "HATENA_CONSUMER_KEY",
-            "\"${localProperties.getProperty("hatena.consumerKey", "")}\"",
+            "\"${providers.environmentVariable("HATENA_CONSUMER_KEY").orNull
+                ?: localProperties.getProperty("hatena.consumerKey", "")}\"",
         )
         buildConfigField(
             "String",
             "HATENA_CONSUMER_SECRET",
-            "\"${localProperties.getProperty("hatena.consumerSecret", "")}\"",
+            "\"${providers.environmentVariable("HATENA_CONSUMER_SECRET").orNull
+                ?: localProperties.getProperty("hatena.consumerSecret", "")}\"",
         )
     }
 
