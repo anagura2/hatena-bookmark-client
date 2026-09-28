@@ -8,6 +8,7 @@ import android.widget.Toast
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
+import android.webkit.CookieManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -321,6 +322,7 @@ private fun HatenaBookmarkNavHost(
         composable(NOTIFICATIONS_ROUTE) {
             NotificationsScreen(
                 oauthClient = oauthClient,
+                webViewStore = webViewStore,
                 onBack = { navController.popBackStack() },
                 onNotificationClick = {
                     navController.navigate("$COMMENT_ROUTE?uri=${Uri.encode(it)}")
@@ -945,37 +947,48 @@ private fun PopularEntriesScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 private fun NotificationsScreen(
     oauthClient: HatenaOAuthClient,
+    webViewStore: RetainedWebViewStore,
     onBack: () -> Unit,
     onOpened: (Long) -> Unit,
     onNotificationClick: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val notificationEndpoint = "https://www.hatena.ne.jp/notify/api/pull"
+    val loginEndpoint = "https://www.hatena.ne.jp/login"
     var state by remember { mutableStateOf<NotificationsState>(NotificationsState.Loading) }
+    var notificationWebView by remember { mutableStateOf<WebView?>(null) }
+    var showNotificationWebView by remember { mutableStateOf(true) }
+    var loginRedirectStarted by remember { mutableStateOf(false) }
     BackHandler(onBack = onBack)
 
     fun loadNotifications() {
         state = NotificationsState.Loading
-        scope.launch {
-            state = try {
-                NotificationsState.Loaded(
-                    withContext(Dispatchers.IO) { oauthClient.fetchNotifications() },
-                )
-            } catch (exception: Exception) {
-                NotificationsState.Error(exception.message ?: "通知を取得できませんでした")
-            }
+        showNotificationWebView = true
+        loginRedirectStarted = false
+        notificationWebView?.reload()
+    }
+
+    fun handleNotificationResponse(response: String) {
+        try {
+            state = NotificationsState.Loaded(oauthClient.parseNotificationsResponse(response))
+            showNotificationWebView = false
+        } catch (exception: Exception) {
+            state = NotificationsState.Error(
+                exception.message ?: "通知を読み取れませんでした",
+            )
         }
     }
 
-    LaunchedEffect(Unit) { loadNotifications() }
+    LaunchedEffect(Unit) { state = NotificationsState.Loading }
     Scaffold(
-        containerColor = Color(0xFFF5FAFA),
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text("通知", fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.White,
-                    titleContentColor = Color(0xFF17383C),
-                    navigationIconContentColor = Color(0xFF17383C),
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
                 ),
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -985,7 +998,58 @@ private fun NotificationsScreen(
             )
         },
     ) { padding ->
-        when (val currentState = state) {
+        if (showNotificationWebView) {
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+                factory = { context ->
+                    webViewStore.obtain(context, "notifications").apply {
+                        notificationWebView = this
+                        CookieManager.getInstance().setAcceptCookie(true)
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        webViewClient = object : WebViewClient() {
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                val pageUrl = url.orEmpty()
+                                if (loginRedirectStarted &&
+                                    pageUrl.isNotBlank() &&
+                                    !pageUrl.startsWith(loginEndpoint) &&
+                                    pageUrl != notificationEndpoint
+                                ) {
+                                    loginRedirectStarted = false
+                                    view?.loadUrl(notificationEndpoint)
+                                    return
+                                }
+                                view?.evaluateJavascript(
+                                    "(function(){return document.body ? document.body.innerText : '';})()",
+                                ) { result ->
+                                    val body = runCatching {
+                                        org.json.JSONTokener(result).nextValue() as? String
+                                    }.getOrNull().orEmpty().trim()
+                                    if (body.contains("\"message\":\"Unauthorized\"")) {
+                                        if (!loginRedirectStarted) {
+                                            loginRedirectStarted = true
+                                            view?.loadUrl(
+                                                "$loginEndpoint?next=" +
+                                                    Uri.encode("/notify/api/pull"),
+                                            )
+                                        }
+                                    } else if (body.startsWith("{") || body.startsWith("[")) {
+                                        handleNotificationResponse(body)
+                                    }
+                                }
+                            }
+                        }
+                        loadUrl(notificationEndpoint)
+                    }
+                },
+                update = { view ->
+                    notificationWebView = view
+                },
+            )
+        } else when (val currentState = state) {
             NotificationsState.Loading -> LoadingContent(padding)
             is NotificationsState.Error -> ErrorContent(
                 message = currentState.message,
@@ -1007,7 +1071,7 @@ private fun NotificationsScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(padding)
-                            .background(Color(0xFFF5FAFA)),
+                            .background(MaterialTheme.colorScheme.background),
                         contentPadding = PaddingValues(bottom = 24.dp),
                     ) {
                         items(currentState.items) { notification ->
@@ -1048,7 +1112,7 @@ private fun NotificationRow(
             Text(
                 text = message,
                 modifier = Modifier.weight(1f),
-                color = Color(0xFF17383C),
+                color = MaterialTheme.colorScheme.onBackground,
                 fontSize = 16.sp,
                 lineHeight = 23.sp,
             )
@@ -1057,14 +1121,14 @@ private fun NotificationRow(
             Text(
                 text = notification.subjectTitle,
                 modifier = Modifier.padding(top = 8.dp),
-                color = Color(0xFF496568),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }
         HorizontalDivider(
             modifier = Modifier.padding(top = 22.dp),
-            color = Color(0xFFD3D0D5),
+            color = MaterialTheme.colorScheme.outlineVariant,
         )
     }
 }

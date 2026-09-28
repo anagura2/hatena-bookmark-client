@@ -125,11 +125,23 @@ internal class HatenaOAuthClient(
             parameters = parameters,
             tokenSecret = tokens.tokenSecret,
         )
+        return parseNotificationsResponse(response)
+    }
+
+    internal fun parseNotificationsResponse(response: String): List<HatenaNotification> {
         val trimmedResponse = response.trim()
+        if (trimmedResponse.isBlank() || trimmedResponse == "null") {
+            return emptyList()
+        }
         val items = if (trimmedResponse.startsWith("[")) {
             JSONArray(trimmedResponse)
         } else {
             val root = JSONObject(trimmedResponse)
+            if (root.optString("message").equals("Unauthorized", ignoreCase = true) ||
+                root.optString("status").equals("unauthorized", ignoreCase = true)
+            ) {
+                return emptyList()
+            }
             root.optJSONArray("notices")
                 ?: root.optJSONArray("notifications")
                 ?: root.optJSONArray("entries")
@@ -139,12 +151,21 @@ internal class HatenaOAuthClient(
         return buildList {
             for (index in 0 until items.length()) {
                 val item = items.optJSONObject(index) ?: continue
+                val objectUsers = item.optJSONArray("object")
                 val users = buildList {
-                    collectNotificationUsers(item, this)
+                    collectNotificationUsers(objectUsers, this)
+                    if (isEmpty()) {
+                        item.optString("user_name")
+                            .takeIf { it.isNotBlank() }
+                            ?.let(::add)
+                    }
                 }.distinct()
+                val verb = item.optString("verb").trim().ifBlank {
+                    if (objectUsers?.length() ?: 0 > 0) "star" else ""
+                }
                 add(
                     HatenaNotification(
-                        verb = item.optString("verb"),
+                        verb = verb,
                         subject = item.optString("subject"),
                         subjectTitle = item.optJSONObject("metadata")?.optString("subject_title").orEmpty(),
                         users = users,
